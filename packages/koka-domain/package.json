@@ -1,0 +1,41 @@
+{
+    "name": "koka-domain",
+    "version": "1.0.0",
+    "description": "A bidirectional data accessors library based on Algebraic Effects and Optics",
+    "keywords": [],
+    "repository": "github:koka-ts/koka",
+    "bugs": "https://github.com/koka-ts/koka/issues",
+    "author": "https://github.com/koka-ts",
+    "main": "cjs/index.js",
+    "types": "cjs/index.d.ts",
+    "files": [
+        "cjs",
+        "esm",
+        "src",
+        "modules"
+    ],
+    "engines": {
+        "node": ">=14.x"
+    },
+    "scripts": {
+        "build": "run-s clean build:cjs build:esm",
+        "build:cjs": "tsc -p tsconfig.cjs.json --composite false",
+        "build:esm": "tsc -p tsconfig.esm.json --composite false",
+        "clean": "shx rm -rf ./cjs ./esm",
+        "test": "jest",
+        "test:coverage": "jest --collectCoverage --coverage"
+    },
+    "dependencies": {
+        "tslib": "^2.3.1",
+        "koka": "^1.0.0"
+    },
+    "devDependencies": {
+        "rimraf": "^3.0.2",
+        "ts-node": "^10.9.2",
+        "tsx": "^4.7.0",
+        "typescript": "^5.0.0"
+    },
+    "publishConfig": {
+        "access": "public"
+    }
+}

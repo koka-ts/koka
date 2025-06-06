@@ -1,0 +1,21 @@
+{
+    "extends": "./tsconfig.json",
+    "compilerOptions": {
+        "noEmit": true,
+        "module": "ESNext",
+        "noCheck": true
+    },
+    "references": [
+        {
+            "path": "./packages/koka/tsconfig.esm.json"
+        },
+        {
+            "path": "./packages/koka-domain/tsconfig.esm.json"
+        },
+        {
+            "path": "./packages/koka-ddd/tsconfig.esm.json"
+        }
+    ],
+    "include": ["./packages"],
+    "exclude": ["./packages/*/__tests__/*", "./packages/*/cjs/*", "./packages/*/esm/*"]
+}

@@ -1,0 +1,18 @@
+{
+    "extends": "../../tsconfig.json",
+    "compilerOptions": {
+        "rootDir": "./src",
+        "outDir": "./cjs",
+        "composite": true,
+        "module": "CommonJS"
+    },
+    "references": [
+        {
+            "path": "../koka/tsconfig.cjs.json"
+        },
+        {
+            "path": "../koka-domain/tsconfig.cjs.json"
+        }
+    ],
+    "include": ["src"]
+}
