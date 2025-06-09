@@ -1,4 +1,4 @@
-import { Eff, Result } from '../src/koka'
+import { Eff, Err, Ctx, Result, isGenerator } from '../src/koka'
 
 describe('Result', () => {
     it('should create ok result', () => {
@@ -22,7 +22,8 @@ describe('Eff.err', () => {
             return 'should not reach here'
         }
 
-        const result = Eff.runResult(test())
+        const result = Eff.run(Eff.result(test()))
+
         expect(result).toEqual({
             type: 'err',
             name: 'TestError',
@@ -35,14 +36,19 @@ describe('Eff.ctx', () => {
     it('should get context value', () => {
         function* test() {
             const value = yield* Eff.ctx('TestCtx').get<number>()
+            const num = yield* Eff.ctx('Num').get<number>()
             return value * 2
         }
 
-        const program = Eff.try(test()).catch({
+        const program0 = Eff.try(test()).catch({
+            Num: 2,
+        })
+
+        const program1 = Eff.try(program0).catch({
             TestCtx: 21,
         })
 
-        const result = Eff.run(program)
+        const result = Eff.run(program1)
         expect(result).toBe(42)
     })
 
@@ -87,10 +93,13 @@ describe('Eff.try/catch', () => {
 
         const program = Eff.try(test()).catch({})
 
-        const result = Eff.runResult(program)
+        const result = Eff.run(
+            Eff.try(program).catch({
+                UnhandledError: (error) => ({ error }),
+            }),
+        )
+
         expect(result).toEqual({
-            type: 'err',
-            name: 'UnhandledError',
             error: 'error',
         })
     })
@@ -100,7 +109,8 @@ describe('Eff.run', () => {
     it('should handle async effects', async () => {
         function* test() {
             const value = yield* Eff.await(Promise.resolve(42))
-            return value * 2
+            const syncValue = yield* Eff.await(2)
+            return value * syncValue
         }
 
         const result = await Eff.run(test())
@@ -126,17 +136,24 @@ describe('Eff.result', () => {
         }
 
         function* failure() {
-            yield* Eff.err('TestError').throw('error')
+            const message = yield* Eff.ctx('TestCtx').get<string>()
+
+            yield* Eff.err('TestError').throw(message)
             return 'should not reach here'
         }
 
         const successResult = Eff.run(Eff.result(success()))
+
         expect(successResult).toEqual({
             type: 'ok',
             value: 42,
         })
 
-        const failureResult = Eff.run(Eff.result(failure()))
+        const failureResult = Eff.run(
+            Eff.try(Eff.result(failure())).catch({
+                TestCtx: 'error',
+            }),
+        )
         expect(failureResult).toEqual({
             type: 'err',
             name: 'TestError',
@@ -160,7 +177,7 @@ describe('Eff.result', () => {
             }
         }
 
-        const result = Eff.runResult(test())
+        const result = Eff.run(Eff.result(test()))
 
         expect(result).toEqual({
             type: 'ok',
@@ -170,18 +187,33 @@ describe('Eff.result', () => {
 })
 
 describe('Eff.ok', () => {
-    it('should unwrap ok result', () => {
+    it('test success', () => {
         function* success() {
             return Result.ok(42)
         }
 
-        function* test() {
+        function* testSuccess() {
             const value = yield* Eff.ok(success())
             return value
         }
 
-        const result = Eff.run(test())
+        const result = Eff.run(testSuccess())
+
         expect(result).toBe(42)
+    })
+
+    it('test failure', () => {
+        function* testFailure() {
+            yield* Eff.ok(Eff.result(Eff.err('TestError').throw('error')))
+        }
+
+        const failureResult = Eff.run(
+            Eff.try(testFailure).catch({
+                TestError: (error) => `Caught: ${error}`,
+            }),
+        )
+
+        expect(failureResult).toBe('Caught: error')
     })
 })
 
@@ -219,5 +251,15 @@ describe('Complex scenarios', () => {
         )
 
         expect(result).toBe('Handled: ctx is zero')
+    })
+})
+
+describe('helpers', () => {
+    it('should check if value is a generator', () => {
+        function* gen() {}
+        const notGen = () => {}
+
+        expect(isGenerator(gen())).toBe(true)
+        expect(isGenerator(notGen())).toBe(false)
     })
 })

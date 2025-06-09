@@ -6,10 +6,14 @@ export type Err<Name extends string, T> = {
 
 export type AnyErr = Err<string, any>
 
+export const ctxSymbol = Symbol('ctx')
+
+export type CtxSymbol = typeof ctxSymbol
+
 export type Ctx<Name extends string, T> = {
     type: 'ctx'
     name: Name
-    context?: T
+    [ctxSymbol]?: T
 }
 
 export type AnyCtx = Ctx<string, any>
@@ -89,12 +93,6 @@ export type MaybePromise<T> = T extends Promise<any> ? T : T | Promise<T>
 
 export type MaybeFunction<T> = T | (() => T)
 
-type AllEff<T extends unknown[], Yield = never, Return extends unknown[] = []> = T extends []
-    ? Generator<Yield, Return, unknown>
-    : T extends [infer R extends Generator<infer Y, infer R, unknown>, ...infer Rest]
-    ? AllEff<Rest, Yield | Y, [...Return, R]>
-    : never
-
 export const Eff = {
     err: <Name extends string>(name: Name) => {
         return {
@@ -104,6 +102,7 @@ export const Eff = {
                     name,
                     error: args[0] as E,
                 }
+                /* istanbul ignore next */
                 throw new Error(`Unexpected resumption of error effect [${name}]`)
             },
         }
@@ -146,7 +145,7 @@ export const Eff = {
                     } else if (isCtxEff(effect)) {
                         const context = handlers[effect.name as keyof Handlers]
 
-                        if (context !== undefined) {
+                        if (handlers.hasOwnProperty(effect.name)) {
                             result = gen.next(context)
                         } else {
                             result = gen.next(yield effect as any)
@@ -172,7 +171,9 @@ export const Eff = {
                         return process(gen.next(value))
                     })
                 } else {
+                    /* istanbul ignore next */
                     effect satisfies never
+                    /* istanbul ignore next */
                     throw new Error(`Unknown effect [${effect}]`)
                 }
             }
@@ -183,18 +184,6 @@ export const Eff = {
         const gen = typeof input === 'function' ? input() : input
 
         return process(gen.next())
-    },
-    runResult<Yield, Return>(
-        input: MaybeFunction<Generator<Yield, Return, unknown>>,
-    ): Async extends Yield ? MaybePromise<Ok<Return> | ExtractErr<Yield>> : Ok<Return> | ExtractErr<Yield> {
-        const gen = typeof input === 'function' ? input() : input
-
-        // @ts-ignore expected
-        return Eff.run(Eff.result(gen))
-    },
-    *throw<E extends AnyErr>(effect: E): Generator<E, never, unknown> {
-        yield effect
-        throw new Error(`Unexpected resumption of error effect [${effect.name}]`)
     },
     *await<T>(value: T | Promise<T>): Generator<Async, T, unknown> {
         if (!(value instanceof Promise)) {
@@ -208,6 +197,7 @@ export const Eff = {
 
         return result as T
     },
+
     *result<Yield, Return>(
         gen: Generator<Yield, Return, unknown>,
     ): Generator<ExcludeErr<Yield>, Ok<Return> | ExtractErr<Yield>, unknown> {
