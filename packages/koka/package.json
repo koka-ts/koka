@@ -1,7 +1,7 @@
 {
     "name": "koka",
     "version": "1.0.0",
-    "description": "An AI-Oriented TypeScript library based on Algebraic Effects",
+    "description": "Lightweight 3kB Effect-TS alternative library based on Algebraic Effects",
     "keywords": [],
     "repository": "github:koka-ts/koka",
     "bugs": "https://github.com/koka-ts/koka/issues",
