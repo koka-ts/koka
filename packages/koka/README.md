@@ -1,16 +1,16 @@
 # Koka - Lightweight 3kB Effect-TS alternative library based on Algebraic Effects
 
-Koka is a lightweight effects library for TypeScript that provides a structured way to handle errors, contexts, and async operations in a composable and type-safe manner.
+Koka is a minimal yet powerful effects library for TypeScript that provides structured error handling, context management, and async operations in a composable, type-safe manner.
 
-Inspired by algebraic effects especially [koka-lang](https://github.com/koka-lang/koka), it offers a more flexible alternative to traditional error handling patterns. You can use it as an alternative to libraries like [Effect-TS](https://github.com/Effect-TS/effect) when you need a simpler, more focused solution for managing effects in your applications.
+Inspired by algebraic effects from [koka-lang](https://github.com/koka-lang/koka), it offers a pragmatic alternative to traditional error handling. Compared to comprehensive solutions like [Effect-TS](https://github.com/Effect-TS/effect), Koka focuses on delivering essential effect management with minimal overhead.
 
-## Features
+## Key Features
 
--   **Typed Effects**: Define and handle typed effects including errors, context, and async operations
--   **Composable**: Effects compose naturally and can be handled at any level of the call stack
--   **Type-Safe**: Full TypeScript support with rich type inference
--   **Minimal API**: Small surface area with powerful primitives
--   **Async Support**: First-class support for async/await patterns
+-   **Typed Effects**: Handle errors, context, and async operations with full type safety
+-   **Composition**: Effects naturally compose across function boundaries
+-   **Minimal API**: Just 7 core functions cover most use cases
+-   **Async Ready**: Seamless Promise integration
+-   **Tiny Footprint**: Only ~3kB gzipped
 
 ## Comparison with Effect-TS
 
@@ -44,26 +44,18 @@ yarn add koka
 pnpm add koka
 ```
 
-## Core Types
+## Core Concepts
 
-An effect type is just a generator function that can yield different types of effects. The core types are:
+Effects are represented as generator functions yielding different effect types:
 
-```ts
-//                      ┌─── Return type
-//                      │   ┌─── Error effect type
-//                      │   │     ┌─── Context Effect type
-//                      │   │     │     ┌─── Async Effect type
-//                      ▼   ▼     ▼     ▼
-type Effect = Generator<T, Err | Ctx | Async>
+```typescript
+type Effect<T, E, C> = Generator<
+    T, // Return type
+    | Err<E> // Error effects
+    | Ctx<C> // Context effects
+    | Async // Async operations
+>
 ```
-
-## Core APIs
-
--   `Eff.err(name).throw(error?)`: Throws an error effect
--   `Eff.ctx(name).get<T>()`: Gets a context value
--   `Eff.await<T>(promise)`: awaits for a promise or value
--   `Eff.try(generator).catch(handlers)`: Handles effects
--   `Eff.run(generator)`: Runs a generator with effects handling
 
 ## Basic Usage
 

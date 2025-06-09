@@ -85,12 +85,20 @@ const result = await Eff.run(
 )
 ```
 
-Key Differences:
+Key Architectural Differences:
 
--   Koka uses plain generators while Effect-TS wraps them in `Effect.gen`
--   Koka's error handling is more imperative-style
--   Koka can automatically infer async operations, while Effect-TS requires explicit async handling via `Effect.runPromise`
--   Effect-TS requires explicit effect wrapping/unwrapping
+-   **Generator Implementation**:
+    -   Koka uses plain generators
+    -   Effect-TS wraps generators in `Effect.gen`
+-   **Error Handling**:
+    -   Koka follows an imperative-style approach
+    -   Effect-TS uses functional error channels
+-   **Async Operations**:
+    -   Koka automatically infers async operations
+    -   Effect-TS requires explicit handling via `Effect.runPromise`
+-   **Effect Management**:
+    -   Koka has minimal wrapping requirements
+    -   Effect-TS requires explicit effect wrapping/unwrapping
 
 ## Context and Dependency Management
 
@@ -145,10 +153,14 @@ Eff.run(
 )
 ```
 
-Key Differences:
+Key Context Management Differences:
 
--   Effect-TS uses a more complex context system with `Context.Tag`
--   Koka uses a simpler context retrieval via `Eff.ctx`
+-   **Effect-TS**:
+    -   Uses a sophisticated context system with `Context.Tag`
+    -   Provides type-safe dependency injection
+-   **Koka**:
+    -   Uses simple string-based context retrieval via `Eff.ctx`
+    -   Offers more straightforward setup
 
 ## Async Operations
 
@@ -180,7 +192,7 @@ Key Differences:
 
 **Choose Effect-TS when:**
 
--   You need a full effect system and ecosystem
+-   You need a full-featured effect system and ecosystem
 -   You require advanced effect combinators
 
 ## Migration Guide
