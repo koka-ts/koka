@@ -185,6 +185,14 @@ export const Eff = {
 
         return process(gen.next())
     },
+    runResult<Yield, Return>(
+        input: MaybeFunction<Generator<Yield, Return, unknown>>,
+    ): Async extends Yield ? MaybePromise<Ok<Return> | ExtractErr<Yield>> : Ok<Return> | ExtractErr<Yield> {
+        const gen = typeof input === 'function' ? input() : input
+
+        // @ts-ignore expected
+        return Eff.run(Eff.result(gen))
+    },
     *await<T>(value: T | Promise<T>): Generator<Async, T, unknown> {
         if (!(value instanceof Promise)) {
             return value

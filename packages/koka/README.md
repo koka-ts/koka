@@ -146,9 +146,11 @@ const result = await Eff.run(
 
 ### interpolating between error effects and result types
 
-You can move all error effects in a generator function from `effect position` to `return position` via using `Eff.result`
+You can move all error effects in a generator function from `effect position` to `return position` via using `Eff.result`.
 
-You can convert any Result type back to a generator function using `Eff.ok`:
+You can convert any Result type back to a generator function using `Eff.ok`
+
+You can run a generator function that returns a Result type using `Eff.runResult`.
 
 ```typescript
 import { Eff, Result } from 'koka'
@@ -170,14 +172,15 @@ if (result.type === 'ok') {
 }
 
 // Convert Result back to error effect
-const generator = Eff.try(Eff.ok(Eff.result(fetchData()))).catch({
-    FetchError: (error) => {
-        console.error('Fetch error:', error)
-        return null
-    },
-})
+const generator = Eff.ok(Eff.result(fetchData()))
 
-const finalResult = Eff.run(generator)
+const finalResult = Eff.runResult(generator)
+
+if (finalResult.type === 'ok') {
+    console.log('Data:', finalResult.value)
+} else {
+    console.error('Error:', finalResult.error)
+}
 ```
 
 ## API Reference
@@ -191,6 +194,7 @@ const finalResult = Eff.run(generator)
 -   `Eff.run(generator)`: Runs a generator (handles async)
 -   `Eff.result(generator)`:
 -   `Eff.ok(generator)`: Unwraps Ok results
+-   `Eff.runResult(generator)`: Runs a generator and returns a Result type
 
 ### Result
 

@@ -1,5 +1,5 @@
 import { Domain } from '../src/koka-domain'
-import { AnyEff, AnyErr, Async, Eff, Result } from 'koka'
+import { Eff } from 'koka'
 
 describe('Domain', () => {
     describe('root()', () => {
