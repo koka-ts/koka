@@ -1,7 +1,15 @@
-import { Ctx, Eff, AnyErr, Async, MaybePromise, Result, isGenerator } from 'koka'
-import { Updater, Domain, DomainErr, getDomainValue } from 'koka-domain'
+import { Ctx, Eff, AnyErr, Async, MaybePromise, Result } from 'koka'
+import { Updater, Optic, OpticOptions, OpticErr, getOpticValue } from 'koka-optic'
 
-export * from 'koka-domain'
+export * from 'koka-optic'
+
+export class Domain<State, Root> {
+    $: Optic<State, Root>
+
+    constructor(options: OpticOptions<State, Root>) {
+        this.$ = new Optic<State, Root>(options)
+    }
+}
 
 export type SetStateInput<S> = S | Updater<S> | ((state: S) => S)
 
@@ -11,43 +19,42 @@ export type SetRoot<Root> = Ctx<'setRoot', (Root: Root) => void>
 
 export type RootAccessor<Root> = GetRoot<Root> | SetRoot<Root>
 
-export type KokaStoreOptions<State> = {
+export type StoreOptions<State> = {
     state: State
 }
 
 export type MaybeFunction<T> = T | (() => T)
 
-export type DomainQuery<Return, Root, E extends AnyErr = never> = Generator<
-    DomainErr | GetRoot<Root> | E,
-    Return,
-    unknown
->
+export type DomainQuery<Return, Root, E extends AnyErr = never> = Generator<OpticErr | GetRoot<Root> | E, Return>
 
-export type DomainCommand<Return, Root, E extends AnyErr = never> = Generator<
-    DomainErr | RootAccessor<Root> | E,
-    Return,
-    unknown
->
+export type DomainCommand<Return, Root, E extends AnyErr = never> = Generator<OpticErr | RootAccessor<Root> | E, Return>
 
-export function* get<State, Root>(domain: Domain<State, Root>): DomainQuery<State, Root> {
+export function* get<State, Root>(domainOrOptic: Domain<State, Root> | Optic<State, Root>): DomainQuery<State, Root> {
+    const optic = domainOrOptic instanceof Domain ? domainOrOptic.$ : domainOrOptic
+
     const getRoot = yield* Eff.ctx('getRoot').get<() => Root>()
 
     const root = getRoot()
 
-    const State = yield* domain.get(root)
+    const State = yield* optic.get(root)
 
     return State
 }
 
-export function* set<State, Root>(domain: Domain<State, Root>, input: SetStateInput<State>): DomainCommand<void, Root> {
-    const updateRoot = domain.set(function* (State) {
-        if (typeof input !== 'function') {
-            return input
+export function* set<State, Root>(
+    domainOrOptic: Domain<State, Root> | Optic<State, Root>,
+    setStateInput: SetStateInput<State>,
+): DomainCommand<void, Root> {
+    const optic = domainOrOptic instanceof Domain ? domainOrOptic.$ : domainOrOptic
+
+    const updateRoot = optic.set(function* (State) {
+        if (typeof setStateInput !== 'function') {
+            return setStateInput
         }
 
-        const result = (input as Updater<State> | ((State: State) => State))(State)
+        const result = (setStateInput as Updater<State> | ((State: State) => State))(State)
 
-        const value = yield* getDomainValue(result)
+        const value = yield* getOpticValue(result)
 
         return value
     })
@@ -65,7 +72,8 @@ export function* set<State, Root>(domain: Domain<State, Root>, input: SetStateIn
 
 export class Store<State> {
     state: State
-    constructor(options: KokaStoreOptions<State>) {
+
+    constructor(options: StoreOptions<State>) {
         this.state = options.state
     }
 
@@ -119,40 +127,38 @@ export class Store<State> {
         }
     }
 
-    get<T>(domain: Domain<T, State>): Result<T, DomainErr> {
-        const result = this.runQuery(get(domain))
+    get<T>(domainOrOptic: Optic<T, State> | Domain<T, State>): Result<T, OpticErr> {
+        const result = this.runQuery(get(domainOrOptic))
         return result
     }
 
-    set<T>(domain: Domain<T, State>, input: SetStateInput<T>): Result<void, DomainErr> {
-        const result = this.runCommand(set(domain, input))
+    set<T>(domainOrOptic: Optic<T, State> | Domain<T, State>, input: SetStateInput<T>): Result<void, OpticErr> {
+        const result = this.runCommand(set(domainOrOptic, input))
         return result
     }
 
-    runQuery<T, E extends DomainErr | GetRoot<State> | AnyErr | Async>(
-        input: MaybeFunction<Generator<E, T, unknown>>,
+    runQuery<T, E extends OpticErr | GetRoot<State> | AnyErr | Async>(
+        input: MaybeFunction<Generator<E, T>>,
     ): Async extends E ? MaybePromise<Result<T, E>> : Result<T, E> {
         const query = typeof input === 'function' ? input() : input
-        const withResult = Eff.result(query)
-        const withRoot = Eff.try(withResult as Generator<GetRoot<State>, unknown, unknown>).catch({
+        const withRoot = Eff.try(query as Generator<GetRoot<State>, T>).catch({
             getRoot: this.getState,
         })
 
-        return Eff.run(withRoot) as any
+        return Eff.runResult(withRoot) as any
     }
 
-    runCommand<T, E extends DomainErr | RootAccessor<State> | AnyErr | Async>(
-        input: MaybeFunction<Generator<E, T, unknown>>,
+    runCommand<T, E extends OpticErr | RootAccessor<State> | AnyErr | Async>(
+        input: MaybeFunction<Generator<E, T>>,
     ): Async extends E ? MaybePromise<Result<T, E>> : Result<T, E> {
         const command = typeof input === 'function' ? input() : input
-        const withResult = Eff.result(command)
-        const withRoot = Eff.try(withResult as Generator<RootAccessor<State>, unknown, unknown>).catch({
+        const withRoot = Eff.try(command as Generator<RootAccessor<State>, T>).catch({
             setRoot: this.setState,
             getRoot: this.getState,
         })
 
         try {
-            return Eff.run(withRoot) as any
+            return Eff.runResult(withRoot) as any
         } finally {
             this.publish()
         }

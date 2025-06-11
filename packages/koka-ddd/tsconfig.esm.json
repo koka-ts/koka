@@ -12,7 +12,7 @@
             "path": "../koka/tsconfig.esm.json"
         },
         {
-            "path": "../koka-domain/tsconfig.esm.json"
+            "path": "../koka-optic/tsconfig.esm.json"
         }
     ],
     "include": ["src"]

@@ -10,7 +10,7 @@
             "path": "./packages/koka/tsconfig.esm.json"
         },
         {
-            "path": "./packages/koka-domain/tsconfig.esm.json"
+            "path": "./packages/koka-optic/tsconfig.esm.json"
         },
         {
             "path": "./packages/koka-ddd/tsconfig.esm.json"

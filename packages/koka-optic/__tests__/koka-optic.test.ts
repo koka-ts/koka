@@ -1,16 +1,16 @@
-import { Domain } from '../src/koka-domain'
+import { Optic } from '../src/koka-optic'
 import { Eff } from 'koka'
 
-describe('Domain', () => {
+describe('Optic', () => {
     describe('root()', () => {
-        it('should create root domain', () => {
-            const rootDomain = Domain.root<number>()
-            expect(rootDomain).toBeInstanceOf(Domain)
+        it('should create root optic', () => {
+            const rootOptic = Optic.root<number>()
+            expect(rootOptic).toBeInstanceOf(Optic)
         })
 
         it('should get root value', () => {
-            const rootDomain = Domain.root<number>()
-            const result = Eff.runResult(rootDomain.get(42))
+            const rootOptic = Optic.root<number>()
+            const result = Eff.runResult(rootOptic.get(42))
 
             if (result.type === 'err') {
                 throw new Error('Expected a number but got an error')
@@ -20,8 +20,8 @@ describe('Domain', () => {
         })
 
         it('should set root value', () => {
-            const rootDomain = Domain.root<number>()
-            const setter = rootDomain.set(function* (number) {
+            const rootOptic = Optic.root<number>()
+            const setter = rootOptic.set(function* (number) {
                 return number + 58
             })
             const result = Eff.runResult(setter(42))
@@ -34,10 +34,10 @@ describe('Domain', () => {
     })
 
     describe('prop()', () => {
-        const objDomain = Domain.root<{ a: number }>().$prop('a')
+        const objOptic = Optic.root<{ a: number }>().prop('a')
 
         it('should get object property', () => {
-            const result = Eff.runResult(objDomain.get({ a: 42 }))
+            const result = Eff.runResult(objOptic.get({ a: 42 }))
 
             if (result.type === 'err') {
                 throw new Error('Expected a number but got an error')
@@ -47,7 +47,7 @@ describe('Domain', () => {
         })
 
         it('should set object property', () => {
-            const setter = objDomain.set(function* () {
+            const setter = objOptic.set(function* () {
                 return 100
             })
             const result = Eff.runResult(setter({ a: 42 }))
@@ -61,10 +61,10 @@ describe('Domain', () => {
     })
 
     describe('index()', () => {
-        const arrDomain = Domain.root<number[]>().$index(0)
+        const arrOptic = Optic.root<number[]>().index(0)
 
         it('should get array index', () => {
-            const result = Eff.runResult(arrDomain.get([42]))
+            const result = Eff.runResult(arrOptic.get([42]))
 
             if (result.type === 'err') {
                 throw new Error('Expected a number but got an error')
@@ -74,7 +74,7 @@ describe('Domain', () => {
         })
 
         it('should set array index', () => {
-            const setter = arrDomain.set(function* () {
+            const setter = arrOptic.set(function* () {
                 return 100
             })
             const result = Eff.runResult(setter([42]))
@@ -87,7 +87,7 @@ describe('Domain', () => {
         })
 
         it('should throw when index out of bounds', () => {
-            const result = Eff.runResult(arrDomain.get([]))
+            const result = Eff.runResult(arrOptic.get([]))
 
             if (result.type === 'ok') {
                 throw new Error('Expected an error but got a number')
@@ -98,9 +98,9 @@ describe('Domain', () => {
     })
 
     describe('find()', () => {
-        const findDomain = Domain.root<number[]>().$find((n) => n === 42)
+        const findOptic = Optic.root<number[]>().find((n) => n === 42)
         it('should find array item', () => {
-            const result = Eff.runResult(findDomain.get([1, 42, 3]))
+            const result = Eff.runResult(findOptic.get([1, 42, 3]))
 
             if (result.type === 'err') {
                 throw new Error('Expected a number but got an error')
@@ -110,7 +110,7 @@ describe('Domain', () => {
         })
 
         it('should throw when item not found', () => {
-            const result = Eff.run(Eff.result(findDomain.get([1, 2, 3])))
+            const result = Eff.run(Eff.result(findOptic.get([1, 2, 3])))
 
             if (result.type === 'ok') {
                 throw new Error('Expected an error but got a number')
@@ -121,10 +121,10 @@ describe('Domain', () => {
     })
 
     describe('match()', () => {
-        const matchDomain = Domain.root<string | number>().$match((v): v is number => typeof v === 'number')
+        const matchOptic = Optic.root<string | number>().match((v): v is number => typeof v === 'number')
 
         it('should match type predicate', () => {
-            const result = Eff.runResult(matchDomain.get(42))
+            const result = Eff.runResult(matchOptic.get(42))
 
             if (result.type === 'err') {
                 throw new Error('Expected a number but got an error')
@@ -134,7 +134,7 @@ describe('Domain', () => {
         })
 
         it('should throw when not matched', () => {
-            const result = Eff.run(Eff.result(matchDomain.get('test')))
+            const result = Eff.run(Eff.result(matchOptic.get('test')))
 
             if (result.type === 'ok') {
                 throw new Error('Expected an error but got a string')
@@ -145,13 +145,13 @@ describe('Domain', () => {
     })
 
     describe('map()', () => {
-        const mapDomain = Domain.root<number[]>().$map({
+        const mapOptic = Optic.root<number[]>().map({
             get: (n) => n * 2,
             set: (newN: number) => newN / 2,
         })
 
         it('should map array items', () => {
-            const result = Eff.runResult(mapDomain.get([1, 2, 3]))
+            const result = Eff.runResult(mapOptic.get([1, 2, 3]))
 
             if (result.type === 'err') {
                 throw new Error('Expected a number but got an error')
@@ -161,7 +161,7 @@ describe('Domain', () => {
         })
 
         it('should set mapped array', () => {
-            const setter = mapDomain.set(function* () {
+            const setter = mapOptic.set(function* () {
                 return [4, 6, 8]
             })
 
@@ -176,10 +176,10 @@ describe('Domain', () => {
     })
 
     describe('filter()', () => {
-        const filterDomain = Domain.root<number[]>().$filter((n) => n > 2)
+        const filterOptic = Optic.root<number[]>().filter((n) => n > 2)
 
         it('should filter array items', () => {
-            const result = Eff.runResult(filterDomain.get([1, 2, 3, 4]))
+            const result = Eff.runResult(filterOptic.get([1, 2, 3, 4]))
 
             if (result.type === 'err') {
                 throw new Error('Expected a number but got an error')
@@ -189,7 +189,7 @@ describe('Domain', () => {
         })
 
         it('should set filtered array', () => {
-            const setter = filterDomain.set(function* () {
+            const setter = filterOptic.set(function* () {
                 return [30, 40]
             })
 
@@ -204,16 +204,16 @@ describe('Domain', () => {
     })
 
     describe('object()', () => {
-        const rootDomain = Domain.root<{ a: number; b: string }>()
+        const rootOptic = Optic.root<{ a: number; b: string }>()
 
-        const objDomain = Domain.object({
-            a: rootDomain.$prop('a'),
-            b: rootDomain.$prop('b'),
+        const objOptic = Optic.object({
+            a: rootOptic.prop('a'),
+            b: rootOptic.prop('b'),
         })
 
-        it('should create object domain', () => {
+        it('should create object optic', () => {
             const rootValue = { a: 42, b: 'test' }
-            const result = Eff.runResult(objDomain.get(rootValue))
+            const result = Eff.runResult(objOptic.get(rootValue))
 
             if (result.type === 'err') {
                 throw new Error('Expected an object but got an error')
@@ -223,7 +223,7 @@ describe('Domain', () => {
         })
 
         it('should set object properties', () => {
-            const setter = objDomain.set(function* () {
+            const setter = objOptic.set(function* () {
                 return { a: 100, b: 'updated' }
             })
 
@@ -238,9 +238,9 @@ describe('Domain', () => {
     })
 
     describe('optional()', () => {
-        const optDomain = Domain.optional(Domain.root<number>().$refine((n) => n > 10))
+        const optOptic = Optic.optional(Optic.root<number>().refine((n) => n > 10))
         it('should handle undefined value', () => {
-            const result = Eff.runResult(optDomain.get(5))
+            const result = Eff.runResult(optOptic.get(5))
 
             if (result.type === 'err') {
                 throw new Error('Expected an undefined value but got an error')
@@ -250,7 +250,7 @@ describe('Domain', () => {
         })
 
         it('should preserve defined value', () => {
-            const result = Eff.runResult(optDomain.get(42))
+            const result = Eff.runResult(optOptic.get(42))
 
             if (result.type === 'err') {
                 throw new Error('Expected a number but got an error')
@@ -262,7 +262,7 @@ describe('Domain', () => {
 
     describe('caching behavior', () => {
         it('should cache prop access', () => {
-            const domain = Domain.root<{ a: { value: number } }>().$prop('a')
+            const optic = Optic.root<{ a: { value: number } }>().prop('a')
             const obj = {
                 a: {
                     value: 42,
@@ -270,14 +270,14 @@ describe('Domain', () => {
             }
 
             // First access - should cache
-            const result1 = Eff.runResult(domain.get(obj))
+            const result1 = Eff.runResult(optic.get(obj))
 
             if (result1.type === 'err') {
                 throw new Error('Expected number but got error')
             }
 
             // Second access - should use cache
-            const result2 = Eff.runResult(domain.get(obj))
+            const result2 = Eff.runResult(optic.get(obj))
 
             if (result2.type === 'err') {
                 throw new Error('Expected number but got error')
@@ -286,18 +286,18 @@ describe('Domain', () => {
         })
 
         it('should cache index access', () => {
-            const domain = Domain.root<{ value: number }[]>().$index(0)
+            const optic = Optic.root<{ value: number }[]>().index(0)
             const arr = [{ value: 42 }]
 
             // First access - should cache
-            const result1 = Eff.runResult(domain.get(arr))
+            const result1 = Eff.runResult(optic.get(arr))
 
             if (result1.type === 'err') {
                 throw new Error('Expected number but got error')
             }
 
             // Second access - should use cache
-            const result2 = Eff.runResult(domain.get(arr))
+            const result2 = Eff.runResult(optic.get(arr))
 
             if (result2.type === 'err') {
                 throw new Error('Expected number but got error')
@@ -307,20 +307,20 @@ describe('Domain', () => {
         })
 
         it('should cache filter results', () => {
-            const domain = Domain.root<{ value: number }[]>()
-                .$map((item) => item.$prop('value'))
-                .$filter((n) => n > 2)
+            const optic = Optic.root<{ value: number }[]>()
+                .map((item) => item.prop('value'))
+                .filter((n) => n > 2)
             const arr = [1, 2, 3, 4].map((n) => ({ value: n }))
 
             // First access - should cache
-            const result1 = Eff.runResult(domain.get(arr))
+            const result1 = Eff.runResult(optic.get(arr))
 
             if (result1.type === 'err') {
                 throw new Error('Expected array but got error')
             }
 
             // Second access - should use cache
-            const result2 = Eff.runResult(domain.get(arr))
+            const result2 = Eff.runResult(optic.get(arr))
 
             if (result2.type === 'err') {
                 throw new Error('Expected array but got error')
@@ -330,9 +330,9 @@ describe('Domain', () => {
         })
 
         it('should cache map operations', () => {
-            const domain = Domain.root<{ value: number }[]>()
-                .$map((item) => item.$prop('value'))
-                .$map({
+            const optic = Optic.root<{ value: number }[]>()
+                .map((item) => item.prop('value'))
+                .map({
                     get: (n) => n * 2,
                     set: (newN: number) => newN / 2,
                 })
@@ -340,14 +340,14 @@ describe('Domain', () => {
             const arr = [1, 2, 3].map((n) => ({ value: n }))
 
             // First access - should cache
-            const result1 = Eff.runResult(domain.get(arr))
+            const result1 = Eff.runResult(optic.get(arr))
 
             if (result1.type === 'err') {
                 throw new Error('Expected array but got error')
             }
 
             // Second access - should use cache
-            const result2 = Eff.runResult(domain.get(arr))
+            const result2 = Eff.runResult(optic.get(arr))
             if (result2.type === 'err') {
                 throw new Error('Expected array but got error')
             }
@@ -356,18 +356,18 @@ describe('Domain', () => {
         })
 
         it('should cache find operations', () => {
-            const domain = Domain.root<{ value: number }[]>().$find((obj) => obj.value === 42)
+            const optic = Optic.root<{ value: number }[]>().find((obj) => obj.value === 42)
             const arr = [1, 42, 3].map((n) => ({ value: n }))
 
             // First access - should cache
-            const result1 = Eff.runResult(domain.get(arr))
+            const result1 = Eff.runResult(optic.get(arr))
 
             if (result1.type === 'err') {
                 throw new Error('Expected number but got error')
             }
 
             // Second access - should use cache
-            const result2 = Eff.runResult(domain.get(arr))
+            const result2 = Eff.runResult(optic.get(arr))
 
             if (result2.type === 'err') {
                 throw new Error('Expected number but got error')
@@ -377,9 +377,9 @@ describe('Domain', () => {
         })
 
         it('should cache refine operations', () => {
-            const domain = Domain.root<{ a: { value: number } }>()
-                .$refine((obj) => obj.a.value > 2)
-                .$prop('a')
+            const optic = Optic.root<{ a: { value: number } }>()
+                .refine((obj) => obj.a.value > 2)
+                .prop('a')
 
             const okObj = {
                 a: {
@@ -394,8 +394,8 @@ describe('Domain', () => {
             }
 
             // First access - should cache
-            const result1 = Eff.runResult(domain.get(okObj))
-            const result2 = Eff.runResult(domain.get(errObj))
+            const result1 = Eff.runResult(optic.get(okObj))
+            const result2 = Eff.runResult(optic.get(errObj))
 
             if (result1.type === 'err') {
                 throw new Error('Expected number but got error')
@@ -406,8 +406,8 @@ describe('Domain', () => {
             }
 
             // Second access - should use cache
-            const result3 = Eff.runResult(domain.get(okObj))
-            const result4 = Eff.runResult(domain.get(errObj))
+            const result3 = Eff.runResult(optic.get(okObj))
+            const result4 = Eff.runResult(optic.get(errObj))
 
             if (result3.type === 'err') {
                 throw new Error('Expected number but got error')
@@ -422,14 +422,14 @@ describe('Domain', () => {
         })
 
         it('should cache nested object operations', () => {
-            const domain = Domain.root<{ a: { b: number }[] }>().$prop('a').$index(1)
+            const optic = Optic.root<{ a: { b: number }[] }>().prop('a').index(1)
 
             const obj = {
                 a: [{ b: 42 }, { b: 100 }],
             }
 
             // First access - should cache
-            const result1 = Eff.runResult(domain.get(obj))
+            const result1 = Eff.runResult(optic.get(obj))
 
             if (result1.type === 'err') {
                 throw new Error('Expected number but got error')
@@ -437,7 +437,7 @@ describe('Domain', () => {
 
             // Second access - should use cache
 
-            const result2 = Eff.runResult(domain.get(obj))
+            const result2 = Eff.runResult(optic.get(obj))
 
             if (result2.type === 'err') {
                 throw new Error('Expected number but got error')
@@ -449,15 +449,15 @@ describe('Domain', () => {
 
     describe('complex combinations', () => {
         it('should combine prop + refine + map', () => {
-            const domain = Domain.root<{ a: number[] }>()
-                .$prop('a')
-                .$refine((arr: number[]) => arr.length > 0)
-                .$map({
+            const optic = Optic.root<{ a: number[] }>()
+                .prop('a')
+                .refine((arr: number[]) => arr.length > 0)
+                .map({
                     get: (value) => value * 2,
                     set: (newValue: number) => newValue / 2,
                 })
 
-            const result = Eff.runResult(domain.get({ a: [1, 2, 3] }))
+            const result = Eff.runResult(optic.get({ a: [1, 2, 3] }))
 
             if (result.type === 'err') {
                 throw new Error('Expected array but got error')
@@ -466,7 +466,7 @@ describe('Domain', () => {
             expect(result.value).toEqual([2, 4, 6])
 
             const setResult = Eff.runResult(
-                domain.set(function* () {
+                optic.set(function* () {
                     return [4, 6, 8]
                 })({ a: [1, 2, 3] }),
             )
@@ -477,25 +477,17 @@ describe('Domain', () => {
 
             expect(setResult.value).toEqual({ a: [2, 3, 4] })
 
-            const errResult = Eff.runResult(domain.get({ a: [] }))
+            const errResult = Eff.runResult(optic.get({ a: [] }))
 
             expect(errResult.type).toBe('err')
         })
 
         it('should combine index + filter + match', () => {
-            const domain = Domain.root<(string | number)[]>()
-                .$filter((v) => typeof v === 'number')
-                .$index(0)
+            const optic = Optic.root<(string | number)[]>()
+                .filter((v) => typeof v === 'number')
+                .index(0)
 
-            let result = Eff.runResult(domain.get([42, 'test', 100]))
-
-            if (result.type === 'err') {
-                throw new Error('Expected number but got error')
-            }
-
-            expect(result.value).toBe(42)
-
-            result = Eff.runResult(domain.get(['test', 42]))
+            let result = Eff.runResult(optic.get([42, 'test', 100]))
 
             if (result.type === 'err') {
                 throw new Error('Expected number but got error')
@@ -503,7 +495,15 @@ describe('Domain', () => {
 
             expect(result.value).toBe(42)
 
-            result = Eff.runResult(domain.get(['test', 'test']))
+            result = Eff.runResult(optic.get(['test', 42]))
+
+            if (result.type === 'err') {
+                throw new Error('Expected number but got error')
+            }
+
+            expect(result.value).toBe(42)
+
+            result = Eff.runResult(optic.get(['test', 'test']))
 
             if (result.type === 'ok') {
                 throw new Error('Expected error but got number')
@@ -513,12 +513,12 @@ describe('Domain', () => {
         })
 
         it('should handle nested object operations', () => {
-            const domain = Domain.root<{ user: { profile: { name: string; age: number } } }>()
-                .$prop('user')
-                .$prop('profile')
+            const optic = Optic.root<{ user: { profile: { name: string; age: number } } }>()
+                .prop('user')
+                .prop('profile')
 
             const result = Eff.runResult(
-                domain.get({
+                optic.get({
                     user: { profile: { name: 'Alice', age: 25 } },
                 }),
             )
@@ -530,7 +530,7 @@ describe('Domain', () => {
             expect(result.value).toEqual({ name: 'Alice', age: 25 })
 
             const setResult = Eff.runResult(
-                domain.set(function* () {
+                optic.set(function* () {
                     return { name: 'Bob', age: 30 }
                 })({
                     user: { profile: { name: 'Alice', age: 25 } },

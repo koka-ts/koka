@@ -1,14 +1,14 @@
 import { Eff, Err, isGenerator } from 'koka'
 
-export type DomainErr = Err<'DomainErr', string>
+export type OpticErr = Err<'OpticErr', string>
 
-export type Getter<State, Root> = (root: Root) => Generator<DomainErr, State, unknown>
+export type Getter<State, Root> = (root: Root) => Generator<OpticErr, State, unknown>
 
-export type Updater<State> = (state: State) => Generator<DomainErr, State, unknown>
+export type Updater<State> = (state: State) => Generator<OpticErr, State, unknown>
 
 export type Setter<State, Root> = (updater: Updater<State>) => Updater<Root>
 
-export type DomainOptions<State, Root> = {
+export type OpticOptions<State, Root> = {
     get: Getter<State, Root>
     set: Setter<State, Root>
 }
@@ -17,9 +17,9 @@ type ArrayItem<T> = T extends (infer U)[] | readonly (infer U)[] ? U : never
 
 type GetKey<T> = (item: ArrayItem<T>) => string | number
 
-export type MaybeDomainEff<T> = T | Generator<DomainErr, T, unknown>
+export type MaybeOpticEff<T> = T | Generator<OpticErr, T, unknown>
 
-export function* getDomainValue<T>(value: MaybeDomainEff<T>): Generator<DomainErr, T, unknown> {
+export function* getOpticValue<T>(value: MaybeOpticEff<T>): Generator<OpticErr, T, unknown> {
     if (isGenerator(value)) {
         return yield* value
     } else {
@@ -28,36 +28,36 @@ export function* getDomainValue<T>(value: MaybeDomainEff<T>): Generator<DomainEr
 }
 
 export type Selector<Target, State> = {
-    get: (state: State) => MaybeDomainEff<Target>
-    set: (target: Target, state: State) => MaybeDomainEff<State>
+    get: (state: State) => MaybeOpticEff<Target>
+    set: (target: Target, state: State) => MaybeOpticEff<State>
 }
 
-export type InferDomainState<T> = T extends Domain<infer State, any> ? State : never
+export type InferOpticState<T> = T extends Optic<infer State, any> ? State : never
 
-export type InferDomainRoot<T> = T extends Domain<any, infer Root> ? Root : never
+export type InferOpticRoot<T> = T extends Optic<any, infer Root> ? Root : never
 
-export type AnyDomain = Domain<any, any>
+export type AnyOptic = Optic<any, any>
 
 export type NestedArray<T> = Array<T | NestedArray<T>>
 
 export type NestedReadonlyArray<T> = ReadonlyArray<T | NestedReadonlyArray<T>>
 
-const domainWeakMap = new WeakMap<object | unknown[], WeakMap<AnyDomain, unknown>>()
+const opticWeakMap = new WeakMap<object | unknown[], WeakMap<AnyOptic, unknown>>()
 
-const setDomainCache = (object: object | unknown[], domain: AnyDomain, value: unknown) => {
-    let domainMap = domainWeakMap.get(object)
+const setOpticCache = (object: object | unknown[], optic: AnyOptic, value: unknown) => {
+    let opticMap = opticWeakMap.get(object)
 
-    if (!domainMap) {
-        domainMap = new WeakMap()
-        domainWeakMap.set(object, domainMap)
+    if (!opticMap) {
+        opticMap = new WeakMap()
+        opticWeakMap.set(object, opticMap)
     }
 
-    domainMap.set(domain, value)
+    opticMap.set(optic, value)
 }
 
-export class Domain<State, Root> {
-    static root<Root>(): Domain<Root, Root> {
-        return new Domain({
+export class Optic<State, Root> {
+    static root<Root>(): Optic<Root, Root> {
+        return new Optic({
             *get(root) {
                 return root
             },
@@ -71,17 +71,17 @@ export class Domain<State, Root> {
         })
     }
 
-    static object<T extends Record<string, AnyDomain>>(
-        domains: T,
-    ): Domain<{ [K in keyof T]: InferDomainState<T[K]> }, InferDomainRoot<T[keyof T]>> {
-        return this.root<InferDomainRoot<T[keyof T]>>()
-            .$select({
+    static object<T extends Record<string, AnyOptic>>(
+        optics: T,
+    ): Optic<{ [K in keyof T]: InferOpticState<T[K]> }, InferOpticRoot<T[keyof T]>> {
+        return this.root<InferOpticRoot<T[keyof T]>>()
+            .select({
                 *get(root) {
-                    const object = {} as { [K in keyof T]: InferDomainState<T[K]> }
+                    const object = {} as { [K in keyof T]: InferOpticState<T[K]> }
 
-                    for (const key in domains) {
+                    for (const key in optics) {
                         // @ts-ignore
-                        object[key] = yield* domains[key].get(root)
+                        object[key] = yield* optics[key].get(root)
                     }
 
                     return {
@@ -99,7 +99,7 @@ export class Domain<State, Root> {
                         }
 
                         // @ts-ignore expected
-                        root = yield* domains[key].set(function* () {
+                        root = yield* optics[key].set(function* () {
                             return newValue as any
                         })(root)
                     }
@@ -107,13 +107,13 @@ export class Domain<State, Root> {
                     return root
                 },
             })
-            .$prop('newObject')
+            .prop('newObject')
     }
 
-    static optional<State, Root>(domain: Domain<State, Root>): Domain<State | undefined, Root> {
-        return Domain.root<Root>().$select<State | undefined>({
+    static optional<State, Root>(optic: Optic<State, Root>): Optic<State | undefined, Root> {
+        return Optic.root<Root>().select<State | undefined>({
             *get(root) {
-                const result = yield* Eff.result(domain.get(root))
+                const result = yield* Eff.result(optic.get(root))
 
                 if (result.type === 'ok') {
                     return result.value
@@ -126,7 +126,7 @@ export class Domain<State, Root> {
 
                 const newState = state as State
 
-                const newRoot = yield* domain.set(function* () {
+                const newRoot = yield* optic.set(function* () {
                     return newState
                 })(root)
 
@@ -135,10 +135,12 @@ export class Domain<State, Root> {
         })
     }
 
+    __type = 'KokaOptic' as const
+
     get: Getter<State, Root>
     set: Setter<State, Root>
 
-    constructor(options: DomainOptions<State, Root>) {
+    constructor(options: OpticOptions<State, Root>) {
         this.get = options.get
         this.set = options.set
     }
@@ -147,43 +149,43 @@ export class Domain<State, Root> {
         return undefined
     }
 
-    $select<Target>(selector: Selector<Target, State>): Domain<Target, Root> {
+    select<Target>(selector: Selector<Target, State>): Optic<Target, Root> {
         const { get, set } = this
 
-        const domain: Domain<Target, Root> = new Domain({
+        const optic: Optic<Target, Root> = new Optic({
             *get(root) {
                 const isObjectRoot = typeof root === 'object' && root !== null
 
-                let domainMap = isObjectRoot ? domainWeakMap.get(root) : null
+                let opticMap = isObjectRoot ? opticWeakMap.get(root) : null
 
-                if (domainMap?.has(domain)) {
-                    return domainMap.get(domain)! as Target
+                if (opticMap?.has(optic)) {
+                    return opticMap.get(optic)! as Target
                 }
 
                 const state = yield* get(root)
 
                 const isObjectState = typeof state === 'object' && state !== null
 
-                domainMap = isObjectState ? domainWeakMap.get(state) : null
+                opticMap = isObjectState ? opticWeakMap.get(state) : null
 
-                if (domainMap?.has(domain)) {
-                    const target = domainMap.get(domain)! as Target
+                if (opticMap?.has(optic)) {
+                    const target = opticMap.get(optic)! as Target
 
                     if (isObjectRoot) {
-                        setDomainCache(root, domain, target)
+                        setOpticCache(root, optic, target)
                     }
 
                     return target
                 }
 
-                const target = yield* getDomainValue(selector.get(state))
+                const target = yield* getOpticValue(selector.get(state))
 
                 if (isObjectState) {
-                    setDomainCache(state, domain, target)
+                    setOpticCache(state, optic, target)
                 }
 
                 if (isObjectRoot) {
-                    setDomainCache(root, domain, target)
+                    setOpticCache(root, optic, target)
                 }
 
                 return target
@@ -194,25 +196,25 @@ export class Domain<State, Root> {
 
                     const isObjectState = typeof state === 'object' && state !== null
 
-                    const domainMap = isObjectState ? domainWeakMap.get(state) : null
+                    const opticMap = isObjectState ? opticWeakMap.get(state) : null
 
-                    if (domainMap?.has(domain)) {
-                        target = domainMap.get(domain)! as Target
+                    if (opticMap?.has(optic)) {
+                        target = opticMap.get(optic)! as Target
                     } else {
-                        target = yield* getDomainValue(selector.get(state))
+                        target = yield* getOpticValue(selector.get(state))
 
                         if (isObjectState) {
-                            setDomainCache(state, domain, target)
+                            setOpticCache(state, optic, target)
                         }
                     }
 
                     const newTarget = yield* updater(target)
-                    const newState = yield* getDomainValue(selector.set(newTarget, state))
+                    const newState = yield* getOpticValue(selector.set(newTarget, state))
 
                     const isObjectNewState = typeof newState === 'object' && newState !== null
 
                     if (isObjectNewState) {
-                        setDomainCache(newState, domain, newTarget)
+                        setOpticCache(newState, optic, newTarget)
                     }
 
                     return newState
@@ -224,11 +226,11 @@ export class Domain<State, Root> {
             },
         })
 
-        return domain
+        return optic
     }
 
-    $prop<Key extends keyof State & string>(key: Key): Domain<State[Key], Root> {
-        return this.$select({
+    prop<Key extends keyof State & string>(key: Key): Optic<State[Key], Root> {
+        return this.select({
             get(state) {
                 return state[key]
             },
@@ -241,16 +243,16 @@ export class Domain<State, Root> {
         })
     }
 
-    $index<Index extends keyof State & number>(index: Index): Domain<State[Index], Root> {
-        return this.$select({
+    index<Index extends keyof State & number>(index: Index): Optic<State[Index], Root> {
+        return this.select({
             *get(state) {
                 if (!Array.isArray(state)) {
-                    throw yield* Eff.err('DomainErr').throw(`[koka-domain] Index ${index} is not applied for an array`)
+                    throw yield* Eff.err('OpticErr').throw(`[koka-optic] Index ${index} is not applied for an array`)
                 }
 
                 if (index < 0 || index >= state.length) {
-                    throw yield* Eff.err('DomainErr').throw(
-                        `[koka-domain] Index ${index} is out of bounds: ${state.length}`,
+                    throw yield* Eff.err('OpticErr').throw(
+                        `[koka-optic] Index ${index} is out of bounds: ${state.length}`,
                     )
                 }
 
@@ -265,28 +267,26 @@ export class Domain<State, Root> {
         })
     }
 
-    $find<Target extends ArrayItem<State>>(
+    find<Target extends ArrayItem<State>>(
         predicate:
             | ((item: ArrayItem<State>, index: number) => boolean)
             | ((item: ArrayItem<State>, index: number) => item is Target),
-    ): Domain<Target, Root> {
+    ): Optic<Target, Root> {
         type TargetInfo = {
             target: Target
             index: number
         }
 
-        return this.$select<TargetInfo>({
+        return this.select<TargetInfo>({
             *get(list) {
                 if (!Array.isArray(list)) {
-                    throw yield* Eff.err('DomainErr').throw(
-                        `[koka-domain] Find ${predicate} is not applied for an array`,
-                    )
+                    throw yield* Eff.err('OpticErr').throw(`[koka-optic] Find ${predicate} is not applied for an array`)
                 }
 
                 const index = list.findIndex(predicate)
 
                 if (index === -1) {
-                    throw yield* Eff.err('DomainErr').throw(`[koka-domain] Item not found`)
+                    throw yield* Eff.err('OpticErr').throw(`[koka-optic] Item not found`)
                 }
 
                 const target = list[index]
@@ -302,14 +302,14 @@ export class Domain<State, Root> {
 
                 return newList as typeof list
             },
-        }).$prop('target')
+        }).prop('target')
     }
 
-    $match<Matched extends State>(predicate: (state: State) => state is Matched): Domain<Matched, Root> {
-        return this.$select({
+    match<Matched extends State>(predicate: (state: State) => state is Matched): Optic<Matched, Root> {
+        return this.select({
             *get(state) {
                 if (!predicate(state)) {
-                    throw yield* Eff.err('DomainErr').throw(`[koka-domain] State does not match by ${predicate}`)
+                    throw yield* Eff.err('OpticErr').throw(`[koka-optic] State does not match by ${predicate}`)
                 }
 
                 return state
@@ -320,11 +320,11 @@ export class Domain<State, Root> {
         })
     }
 
-    $refine(predicate: (state: State) => boolean): Domain<State, Root> {
-        return this.$select({
+    refine(predicate: (state: State) => boolean): Optic<State, Root> {
+        return this.select({
             *get(state) {
                 if (!predicate(state)) {
-                    throw yield* Eff.err('DomainErr').throw(`[koka-domain] State does not match by ${predicate}`)
+                    throw yield* Eff.err('OpticErr').throw(`[koka-optic] State does not match by ${predicate}`)
                 }
 
                 return state
@@ -335,29 +335,29 @@ export class Domain<State, Root> {
         })
     }
 
-    $as<Refined>(): Domain<Refined, Root> {
-        return this as unknown as Domain<Refined, Root>
+    as<Refined>(): Optic<Refined, Root> {
+        return this as unknown as Optic<Refined, Root>
     }
 
-    $map<Target>(
+    map<Target>(
         mapper:
             | Selector<Target, ArrayItem<State>>
-            | Domain<Target, ArrayItem<State>>
-            | ((state: Domain<ArrayItem<State>, ArrayItem<State>>) => Domain<Target, ArrayItem<State>>),
-    ): Domain<Target[], Root> {
-        const from = Domain.root<ArrayItem<State>>()
+            | Optic<Target, ArrayItem<State>>
+            | ((state: Optic<ArrayItem<State>, ArrayItem<State>>) => Optic<Target, ArrayItem<State>>),
+    ): Optic<Target[], Root> {
+        const from = Optic.root<ArrayItem<State>>()
 
-        let mapper$: Domain<Target, ArrayItem<State>>
+        let mapper$: Optic<Target, ArrayItem<State>>
 
         if (typeof mapper === 'function') {
             mapper$ = mapper(from)
-        } else if (mapper instanceof Domain) {
+        } else if (mapper instanceof Optic) {
             mapper$ = mapper
         } else {
-            mapper$ = from.$select(mapper)
+            mapper$ = from.select(mapper)
         }
 
-        return this.$select({
+        return this.select({
             *get(state) {
                 const list = state as ArrayItem<State>[]
 
@@ -377,8 +377,8 @@ export class Domain<State, Root> {
                 const newList = [] as ArrayItem<State>[]
 
                 if (list.length !== targetList.length) {
-                    throw yield* Eff.err('DomainErr').throw(
-                        `[koka-domain] List length mismatch: ${list.length} !== ${targetList.length}`,
+                    throw yield* Eff.err('OpticErr').throw(
+                        `[koka-optic] List length mismatch: ${list.length} !== ${targetList.length}`,
                     )
                 }
 
@@ -401,11 +401,11 @@ export class Domain<State, Root> {
 
     getKey?: GetKey<State>
 
-    $filter<Target extends ArrayItem<State>>(
+    filter<Target extends ArrayItem<State>>(
         predicate:
             | ((item: ArrayItem<State>, index: number) => boolean)
             | ((item: ArrayItem<State>, index: number) => item is Target),
-    ): Domain<Target[], Root> {
+    ): Optic<Target[], Root> {
         const { getKey } = this
 
         type Index = number
@@ -422,11 +422,11 @@ export class Domain<State, Root> {
             indexList?: IndexList
         }
 
-        return this.$select<FilteredInfo>({
+        return this.select<FilteredInfo>({
             *get(list) {
                 if (!Array.isArray(list)) {
-                    throw yield* Eff.err('DomainErr').throw(
-                        `[koka-domain] Filter ${predicate} is not applied for an array`,
+                    throw yield* Eff.err('OpticErr').throw(
+                        `[koka-optic] Filter ${predicate} is not applied for an array`,
                     )
                 }
 
@@ -444,7 +444,7 @@ export class Domain<State, Root> {
                         }
 
                         if (key in indexRecord) {
-                            throw new Error(`[koka-domain] Key ${key} is not unique`)
+                            throw new Error(`[koka-optic] Key ${key} is not unique`)
                         }
 
                         indexRecord[key] = index
@@ -497,6 +497,6 @@ export class Domain<State, Root> {
 
                 return newList as State
             },
-        }).$prop('filtered')
+        }).prop('filtered')
     }
 }

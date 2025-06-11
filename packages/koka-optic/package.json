@@ -1,5 +1,5 @@
 {
-    "name": "koka-domain",
+    "name": "koka-optic",
     "version": "1.0.0",
     "description": "A bidirectional data accessors library based on Algebraic Effects and Optics",
     "keywords": [],

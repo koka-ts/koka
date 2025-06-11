@@ -1,7 +1,7 @@
 module.exports = {
     ...require('../../jest.config'),
     displayName: {
-        name: 'koka-domain',
+        name: 'koka-optic',
         color: 'blue',
     },
     collectCoverageFrom: ['src/**/*.{ts,tsx}'],

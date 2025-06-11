@@ -11,7 +11,7 @@
             "path": "../koka/tsconfig.cjs.json"
         },
         {
-            "path": "../koka-domain/tsconfig.cjs.json"
+            "path": "../koka-optic/tsconfig.cjs.json"
         }
     ],
     "include": ["src"]

@@ -1,5 +1,5 @@
 import { Eff } from 'koka'
-import { Store, Domain, get, set } from '../src/koka-ddd'
+import { Store, Domain, Optic, get, set } from '../src/koka-ddd'
 
 type UserEntity = {
     id: string
@@ -28,7 +28,7 @@ type RootState = {
 
 class UserStorageDomain<Root extends RootState> extends Domain<Root['users'], Root> {
     constructor() {
-        super(Domain.root<Root>().$prop('users'))
+        super(Optic.root<Root>().prop('users'))
     }
     *getUser(id: string) {
         const users = yield* get(this)
@@ -58,7 +58,7 @@ class UserStorageDomain<Root extends RootState> extends Domain<Root['users'], Ro
 
 class OrderStorageDomain<Root extends RootState> extends Domain<Root['orders'], Root> {
     constructor() {
-        super(Domain.root<Root>().$prop('orders'))
+        super(Optic.root<Root>().prop('orders'))
     }
     *getOrder(id: string) {
         const orders = yield* get(this)
@@ -88,7 +88,7 @@ class OrderStorageDomain<Root extends RootState> extends Domain<Root['orders'], 
 
 class ProductStorageDomain<Root extends RootState> extends Domain<Root['products'], Root> {
     constructor() {
-        super(Domain.root<Root>().$prop('products'))
+        super(Optic.root<Root>().prop('products'))
     }
     *getProduct(id: string) {
         const products = yield* get(this)

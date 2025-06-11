@@ -13,28 +13,28 @@ A lightweight 3kB alternative to Effect-TS based on Algebraic Effects
 -   Async operations
 -   Minimal API surface
 
-### [koka-ddd](packages/koka-ddd/) - DDD Framework
+### [koka-optic](packages/koka-optic) - Data Accessors
 
-An AI-Oriented Domain-Driven Design framework built on Koka
-
--   Algebraic effects for domain modeling
--   Optics integration
--   CQRS patterns
-
-### [koka-domain](packages/koka-domain) - Data Accessors
-
-Bidirectional data accessors with optics
+Bidirectional data accessors with optics based on `koka`
 
 -   Type-safe data transformations
 -   Lens/prism support
 -   Effectful data operations
 -   Composable access patterns
 
+### [koka-ddd](packages/koka-ddd/) - DDD Framework
+
+An AI-Oriented Domain-Driven Design framework built on `koka` and `koka-optic`
+
+-   Follows DDD principles
+-   Optics integration
+-   CQRS patterns
+
 ## Documentation
 
 -   [Koka Core Documentation](packages/koka/README.md)
 -   [Koka DDD Documentation](packages/koka-ddd/README.md)
--   [Koka Domain Documentation](packages/koka-domain/README.md)
+-   [Koka Optic Documentation](packages/koka-optic/README.md)
 
 ## Contributing
 

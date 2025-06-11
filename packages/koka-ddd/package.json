@@ -28,7 +28,7 @@
     "dependencies": {
         "tslib": "^2.3.1",
         "koka": "^1.0.0",
-        "koka-domain": "^1.0.0"
+        "koka-optic": "^1.0.0"
     },
     "devDependencies": {
         "rimraf": "^3.0.2",

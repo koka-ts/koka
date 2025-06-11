@@ -10,7 +10,7 @@
             "path": "./packages/koka/tsconfig.cjs.json"
         },
         {
-            "path": "./packages/koka-domain/tsconfig.cjs.json"
+            "path": "./packages/koka-optic/tsconfig.cjs.json"
         },
         {
             "path": "./packages/koka-ddd/tsconfig.cjs.json"

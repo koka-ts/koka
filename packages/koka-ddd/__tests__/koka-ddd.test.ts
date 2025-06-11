@@ -1,5 +1,5 @@
 import { Eff } from 'koka'
-import { Store, Domain, get, set } from '../src/koka-ddd'
+import { Store, Domain, get, set, Optic } from '../src/koka-ddd'
 
 type Todo = {
     id: number
@@ -32,8 +32,8 @@ class BoolDomain<Root> extends Domain<boolean, Root> {
 }
 
 class TodoDomain<Root> extends Domain<Todo, Root> {
-    text = new TextDomain(this.$prop('text'))
-    done = new BoolDomain(this.$prop('done'));
+    text = new TextDomain(this.$.prop('text'))
+    done = new BoolDomain(this.$.prop('done'));
 
     *updateTodoText(text: string) {
         yield* this.text.updateText(text)
@@ -61,26 +61,26 @@ class TodoListDomain<Root> extends Domain<Todo[], Root> {
     }
 
     todo(id: number) {
-        return new TodoDomain(this.$find((todo) => todo.id === id))
+        return new TodoDomain(this.$.find((todo) => todo.id === id))
     }
 
     getKey = (todo: Todo) => {
         return todo.id
     }
 
-    completedTodoList = this.$filter((todo) => todo.done)
-    activeTodoList = this.$filter((todo) => !todo.done)
-    activeTodoTextList = this.activeTodoList.$map((todo$) => todo$.$prop('text'))
-    completedTodoTextList = this.completedTodoList.$map((todo$) => todo$.$prop('text'))
+    completedTodoList = this.$.filter((todo) => todo.done)
+    activeTodoList = this.$.filter((todo) => !todo.done)
+    activeTodoTextList = this.activeTodoList.map((todo$) => todo$.prop('text'))
+    completedTodoTextList = this.completedTodoList.map((todo$) => todo$.prop('text'))
 
-    texts = Domain.object({
+    texts = Optic.object({
         completed: this.completedTodoTextList,
         active: this.activeTodoTextList,
     })
 }
 
 class TodoAppDomain<Root> extends Domain<TodoApp, Root> {
-    todos = new TodoListDomain(this.$prop('todos'));
+    todos = new TodoListDomain(this.$.prop('todos'));
 
     *addTodo() {
         const todoApp = yield* get(this)
@@ -90,7 +90,7 @@ class TodoAppDomain<Root> extends Domain<TodoApp, Root> {
     }
 
     *updateInput(input: string) {
-        const text = yield* Eff.await(Promise.resolve('test async'))
+        yield* Eff.await(Promise.resolve('test async'))
         yield* set(this, (todoApp) => ({
             ...todoApp,
             input,
@@ -99,7 +99,7 @@ class TodoAppDomain<Root> extends Domain<TodoApp, Root> {
     }
 }
 
-const todoApp$ = new TodoAppDomain(Domain.root<TodoApp>())
+const todoApp$ = new TodoAppDomain(Optic.root<TodoApp>())
 
 describe('TodoAppDomain', () => {
     let store: Store<TodoApp>
