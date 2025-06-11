@@ -197,7 +197,7 @@ describe('Eff.ok', () => {
             return value
         }
 
-        const result = Eff.run(testSuccess())
+        const result = Eff.run(testSuccess)
 
         expect(result).toBe(42)
     })
@@ -214,6 +214,42 @@ describe('Eff.ok', () => {
         )
 
         expect(failureResult).toBe('Caught: error')
+    })
+})
+
+describe('Eff.runResult', () => {
+    it('should run generator and return Result', async () => {
+        function* program(input: number) {
+            const value = yield* Eff.await(Promise.resolve(input))
+
+            if (value === 0) {
+                yield* Eff.err('ZeroError').throw('value is zero')
+            }
+
+            return value
+        }
+
+        const result = await Eff.runResult(program(42))
+
+        expect(result).toEqual({
+            type: 'ok',
+            value: 42,
+        })
+    })
+
+    it('should handle error in generator', () => {
+        function* program() {
+            yield* Eff.err('TestError').throw('error message')
+            return 'should not reach here'
+        }
+
+        const result = Eff.runResult(program)
+
+        expect(result).toEqual({
+            type: 'err',
+            name: 'TestError',
+            error: 'error message',
+        })
     })
 })
 

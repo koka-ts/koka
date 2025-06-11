@@ -44,18 +44,6 @@ type ExtractFunctions<Handlers> = {
     [key in keyof Handlers]: Handlers[key] extends AnyFn ? Handlers[key] : never
 }[keyof Handlers]
 
-const isAsyncEff = (input: unknown): input is Async => {
-    return (input as any)?.type === 'async'
-}
-
-const isCtxEff = (input: unknown): input is AnyCtx => {
-    return (input as any)?.type === 'ctx'
-}
-
-const isErrEff = (input: unknown): input is AnyErr => {
-    return (input as any)?.type === 'err'
-}
-
 export type ExtractErr<T> = T extends AnyErr ? T : never
 
 export type ExcludeErr<T> = T extends AnyErr ? never : T
@@ -93,10 +81,10 @@ export type MaybePromise<T> = T extends Promise<any> ? T : T | Promise<T>
 
 export type MaybeFunction<T> = T | (() => T)
 
-export const Eff = {
-    err: <Name extends string>(name: Name) => {
+export class Eff {
+    static err = <Name extends string>(name: Name) => {
         return {
-            *throw<E = void>(...args: void extends E ? [] : [E]): Generator<Err<Name, E>, never, unknown> {
+            *throw<E = void>(...args: void extends E ? [] : [E]): Generator<Err<Name, E>, never> {
                 yield {
                     type: 'err',
                     name,
@@ -106,10 +94,10 @@ export const Eff = {
                 throw new Error(`Unexpected resumption of error effect [${name}]`)
             },
         }
-    },
-    ctx: <Name extends string>(name: Name) => {
+    }
+    static ctx = <Name extends string>(name: Name) => {
         return {
-            *get<T>(): Generator<Ctx<Name, T>, T, unknown> {
+            *get<T>(): Generator<Ctx<Name, T>, T> {
                 const context = yield {
                     type: 'ctx',
                     name,
@@ -118,23 +106,19 @@ export const Eff = {
                 return context as T
             },
         }
-    },
-    try: <Yield, Return>(input: MaybeFunction<Generator<Yield, Return, unknown>>) => {
+    }
+    static try = <Yield extends AnyEff, Return>(input: MaybeFunction<Generator<Yield, Return>>) => {
         return {
             *catch<Handlers extends Partial<EffectHandlers<Yield>>>(
                 handlers: Handlers,
-            ): Generator<
-                Exclude<Yield, { name: keyof Handlers }>,
-                Return | ReturnType<ExtractFunctions<Handlers>>,
-                unknown
-            > {
+            ): Generator<Exclude<Yield, { name: keyof Handlers }>, Return | ReturnType<ExtractFunctions<Handlers>>> {
                 const gen = typeof input === 'function' ? input() : input
                 let result = gen.next()
 
                 while (!result.done) {
                     const effect = result.value
 
-                    if (isErrEff(effect)) {
+                    if (effect.type === 'err') {
                         const errorHandler = handlers[effect.name as keyof Handlers]
 
                         if (typeof errorHandler === 'function') {
@@ -142,7 +126,7 @@ export const Eff = {
                         } else {
                             result = gen.next(yield effect as any)
                         }
-                    } else if (isCtxEff(effect)) {
+                    } else if (effect.type === 'ctx') {
                         const context = handlers[effect.name as keyof Handlers]
 
                         if (handlers.hasOwnProperty(effect.name)) {
@@ -158,42 +142,36 @@ export const Eff = {
                 return result.value
             },
         }
-    },
-    run: <Effect extends Async, Return>(
-        input: MaybeFunction<Generator<Effect, Return, unknown>>,
-    ): Async extends Effect ? MaybePromise<Return> : Return => {
-        const process = (result: IteratorResult<Effect, Return>): any => {
-            while (!result.done) {
-                const effect = result.value
+    }
+    static run<Return>(input: MaybeFunction<Generator<never, Return>>): Return
+    static run<Return>(input: MaybeFunction<Generator<Async, Return>>): MaybePromise<Return>
+    static run<Return>(input: MaybeFunction<Generator<Async, Return>>): MaybePromise<Return> {
+        const process = (result: IteratorResult<Async, Return>): MaybePromise<Return> => {
+            if (!result.done) {
+                const asyncEff = result.value
 
-                if (isAsyncEff(effect)) {
-                    return effect.value.then((value) => {
-                        return process(gen.next(value))
-                    })
-                } else {
-                    /* istanbul ignore next */
-                    effect satisfies never
-                    /* istanbul ignore next */
-                    throw new Error(`Unknown effect [${effect}]`)
-                }
+                return asyncEff.value.then((value) => {
+                    return process(gen.next(value))
+                }) as MaybePromise<Return>
             }
 
-            return result.value
+            return result.value as MaybePromise<Return>
         }
 
         const gen = typeof input === 'function' ? input() : input
 
         return process(gen.next())
-    },
-    runResult<Yield, Return>(
-        input: MaybeFunction<Generator<Yield, Return, unknown>>,
+    }
+    static runResult<Yield, Return>(
+        input: MaybeFunction<Generator<Yield, Return>>,
     ): Async extends Yield ? MaybePromise<Ok<Return> | ExtractErr<Yield>> : Ok<Return> | ExtractErr<Yield> {
         const gen = typeof input === 'function' ? input() : input
 
         // @ts-ignore expected
         return Eff.run(Eff.result(gen))
-    },
-    *await<T>(value: T | Promise<T>): Generator<Async, T, unknown> {
+    }
+
+    static *await<T>(value: T | Promise<T>): Generator<Async, T> {
         if (!(value instanceof Promise)) {
             return value
         }
@@ -204,17 +182,17 @@ export const Eff = {
         }
 
         return result as T
-    },
+    }
 
-    *result<Yield, Return>(
-        gen: Generator<Yield, Return, unknown>,
-    ): Generator<ExcludeErr<Yield>, Ok<Return> | ExtractErr<Yield>, unknown> {
+    static *result<Yield extends AnyEff, Return>(
+        gen: Generator<Yield, Return>,
+    ): Generator<ExcludeErr<Yield>, Ok<Return> | ExtractErr<Yield>> {
         let result = gen.next()
 
         while (!result.done) {
             const effect = result.value
 
-            if (isErrEff(effect)) {
+            if (effect.type === 'err') {
                 return effect as ExtractErr<Yield>
             } else {
                 result = gen.next(yield effect as any)
@@ -225,14 +203,14 @@ export const Eff = {
             type: 'ok',
             value: result.value,
         }
-    },
+    }
     /**
      * convert a generator to a generator that returns a value
      * move the err from return to throw
      */
-    *ok<Yield, Return extends AnyOk | AnyErr>(
-        gen: Generator<Yield, Return, unknown>,
-    ): Generator<Yield | ExtractErr<Return>, InferOkValue<Return>, unknown> {
+    static *ok<Yield, Return extends AnyOk | AnyErr>(
+        gen: Generator<Yield, Return>,
+    ): Generator<Yield | ExtractErr<Return>, InferOkValue<Return>> {
         const result = yield* gen
 
         if (result.type === 'ok') {
@@ -240,7 +218,7 @@ export const Eff = {
         } else {
             throw yield result as ExtractErr<Return>
         }
-    },
+    }
 }
 
 export const isGenerator = <T = unknown, TReturn = any, TNext = any>(
