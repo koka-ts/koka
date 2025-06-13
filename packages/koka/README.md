@@ -163,7 +163,7 @@ function* fetchData() {
     return data.json()
 }
 
-const result = Eff.run(Eff.result(fetchData()))
+const result = await Eff.run(Eff.result(fetchData()))
 
 if (result.type === 'ok') {
     console.log('Data:', result.value)
@@ -174,7 +174,7 @@ if (result.type === 'ok') {
 // Convert Result back to error effect
 const generator = Eff.ok(Eff.result(fetchData()))
 
-const finalResult = Eff.runResult(generator)
+const finalResult = await Eff.runResult(generator)
 
 if (finalResult.type === 'ok') {
     console.log('Data:', finalResult.value)
@@ -192,7 +192,7 @@ if (finalResult.type === 'ok') {
 -   `Eff.await<T>(Promise<T> | T)`: Handles async operations
 -   `Eff.try(generator).catch(handlers)`: Handles effects
 -   `Eff.run(generator)`: Runs a generator (handles async)
--   `Eff.result(generator)`:
+-   `Eff.result(generator)`: Wraps error effects in Result type as a return value  
 -   `Eff.ok(generator)`: Unwraps Ok results
 -   `Eff.runResult(generator)`: Runs a generator and returns a Result type
 
