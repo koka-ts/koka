@@ -1,21 +1,12 @@
 {
-    "extends": "./tsconfig.json",
+    "extends": "../../tsconfig.json",
     "compilerOptions": {
-        "noEmit": true,
+        "rootDir": "./src",
+        "outDir": "./esm",
+        "composite": true,
         "module": "ESNext",
-        "noCheck": true
+        "target": "ES2020"
     },
-    "references": [
-        {
-            "path": "./packages/koka/tsconfig.esm.json"
-        },
-        {
-            "path": "./packages/koka-optic/tsconfig.esm.json"
-        },
-        {
-            "path": "./packages/koka-ddd/tsconfig.esm.json"
-        }
-    ],
-    "include": ["./packages"],
-    "exclude": ["./packages/*/__tests__/*", "./packages/*/cjs/*", "./packages/*/esm/*"]
+    "references": [],
+    "include": ["src"]
 }

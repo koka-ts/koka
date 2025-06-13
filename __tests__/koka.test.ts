@@ -282,6 +282,7 @@ describe('Complex scenarios', () => {
         const result = await Eff.run(
             Eff.try(program()).catch({
                 TestCtx: 0,
+                e: 1,
                 ZeroError: (error) => `Handled: ${error}`,
             }),
         )

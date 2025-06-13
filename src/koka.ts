@@ -109,7 +109,7 @@ export class Eff {
     }
     static try = <Yield extends AnyEff, Return>(input: MaybeFunction<Generator<Yield, Return>>) => {
         return {
-            *catch<Handlers extends Partial<EffectHandlers<Yield>>>(
+            *catch<Handlers extends Partial<EffectHandlers<Yield>> | {}>(
                 handlers: Handlers,
             ): Generator<Exclude<Yield, { name: keyof Handlers }>, Return | ReturnType<ExtractFunctions<Handlers>>> {
                 const gen = typeof input === 'function' ? input() : input

@@ -1,21 +1,11 @@
 {
-    "extends": "./tsconfig.json",
+    "extends": "../../tsconfig.json",
     "compilerOptions": {
-        "noEmit": true,
-        "module": "CommonJS",
-        "noCheck": true
+        "rootDir": "./src",
+        "outDir": "./cjs",
+        "composite": true,
+        "module": "CommonJS"
     },
-    "references": [
-        {
-            "path": "./packages/koka/tsconfig.cjs.json"
-        },
-        {
-            "path": "./packages/koka-optic/tsconfig.cjs.json"
-        },
-        {
-            "path": "./packages/koka-ddd/tsconfig.cjs.json"
-        }
-    ],
-    "include": ["./packages"],
-    "exclude": ["./packages/*/__tests__/*", "./packages/*/dist", "./packages/*/cjs", "./packages/*/esm"]
+    "references": [],
+    "include": ["src"]
 }
