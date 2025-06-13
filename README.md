@@ -1,5 +1,7 @@
 # Koka - Lightweight 3kB Effect-TS alternative library based on Algebraic Effects
 
+** Warning: This library is in early development and may change significantly. Do not use in production yet. **
+
 Koka is a minimal yet powerful effects library for TypeScript that provides structured error handling, context management, and async operations in a composable, type-safe manner.
 
 Inspired by algebraic effects from [koka-lang](https://github.com/koka-lang/koka), it offers a pragmatic alternative to traditional error handling. Compared to comprehensive solutions like [Effect-TS](https://github.com/Effect-TS/effect), Koka focuses on delivering essential effect management with minimal overhead.

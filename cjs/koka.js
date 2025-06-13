@@ -24,10 +24,15 @@ var Eff = /** @class */ (function () {
     Eff.run = function (input) {
         var process = function (result) {
             if (!result.done) {
-                var asyncEff = result.value;
-                return asyncEff.value.then(function (value) {
-                    return process(gen.next(value));
-                });
+                var effect = result.value;
+                if (effect.type === 'async') {
+                    return effect.value.then(function (value) {
+                        return process(gen.next(value));
+                    });
+                }
+                else {
+                    throw new Error("Expected async effect, but got: ".concat(JSON.stringify(effect, null, 2)));
+                }
             }
             return result.value;
         };

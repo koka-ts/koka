@@ -34,6 +34,10 @@ type ToHandler<Effect> = Effect extends Err<infer Name, infer U>
     ? Record<Name, (error: U) => unknown>
     : Effect extends Ctx<infer Name, infer U>
     ? Record<Name, U>
+    : Effect extends Async
+    ? {
+          async: (value: Promise<unknown>) => Promise<unknown>
+      }
     : never
 
 export type EffectHandlers<Effect> = UnionToIntersection<ToHandler<Effect>>
@@ -77,6 +81,10 @@ export const Result = {
 
 type InferOkValue<T> = T extends Ok<infer U> ? U : never
 
+type Prettier<T> = {
+    [K in keyof T]: T[K]
+}
+
 export type MaybePromise<T> = T extends Promise<any> ? T : T | Promise<T>
 
 export type MaybeFunction<T> = T | (() => T)
@@ -109,7 +117,7 @@ export class Eff {
     }
     static try = <Yield extends AnyEff, Return>(input: MaybeFunction<Generator<Yield, Return>>) => {
         return {
-            *catch<Handlers extends Partial<EffectHandlers<Yield>> | {}>(
+            *catch<Handlers extends Partial<EffectHandlers<Yield>> & {}>(
                 handlers: Handlers,
             ): Generator<Exclude<Yield, { name: keyof Handlers }>, Return | ReturnType<ExtractFunctions<Handlers>>> {
                 const gen = typeof input === 'function' ? input() : input
@@ -127,15 +135,21 @@ export class Eff {
                             result = gen.next(yield effect as any)
                         }
                     } else if (effect.type === 'ctx') {
-                        const context = handlers[effect.name as keyof Handlers]
-
                         if (handlers.hasOwnProperty(effect.name)) {
+                            const context = handlers[effect.name as keyof Handlers]
                             result = gen.next(context)
                         } else {
                             result = gen.next(yield effect as any)
                         }
-                    } else {
+                    } else if (effect.type === 'async') {
+                        if ('async' in handlers) {
+                            const asyncHandler = handlers['async'] as (value: Promise<unknown>) => Promise<unknown>
+                            result = gen.next(yield asyncHandler(effect.value) as any)
+                        }
                         result = gen.next(yield effect as any)
+                    } else {
+                        effect satisfies never
+                        throw new Error(`Unexpected effect: ${JSON.stringify(effect, null, 2)}`)
                     }
                 }
 
@@ -148,11 +162,15 @@ export class Eff {
     static run<Return>(input: MaybeFunction<Generator<Async, Return>>): MaybePromise<Return> {
         const process = (result: IteratorResult<Async, Return>): MaybePromise<Return> => {
             if (!result.done) {
-                const asyncEff = result.value
+                const effect = result.value
 
-                return asyncEff.value.then((value) => {
-                    return process(gen.next(value))
-                }) as MaybePromise<Return>
+                if (effect.type === 'async') {
+                    return effect.value.then((value) => {
+                        return process(gen.next(value))
+                    }) as MaybePromise<Return>
+                } else {
+                    throw new Error(`Expected async effect, but got: ${JSON.stringify(effect, null, 2)}`)
+                }
             }
 
             return result.value as MaybePromise<Return>
