@@ -39,6 +39,12 @@ var Eff = /** @class */ (function () {
         var gen = typeof input === 'function' ? input() : input;
         return process(gen.next());
     };
+    Eff.runSync = function (effect) {
+        return this.run(effect);
+    };
+    Eff.runAsync = function (input) {
+        return this.run(input);
+    };
     Eff.runResult = function (input) {
         var gen = typeof input === 'function' ? input() : input;
         // @ts-ignore expected
@@ -161,7 +167,7 @@ var Eff = /** @class */ (function () {
                             result = gen.next();
                             _g.label = 1;
                         case 1:
-                            if (!!result.done) return [3 /*break*/, 12];
+                            if (!!result.done) return [3 /*break*/, 13];
                             effect = result.value;
                             if (!(effect.type === 'err')) return [3 /*break*/, 5];
                             errorHandler = handlers[effect.name];
@@ -173,11 +179,11 @@ var Eff = /** @class */ (function () {
                         case 3:
                             result = _b.apply(_a, [_g.sent()]);
                             _g.label = 4;
-                        case 4: return [3 /*break*/, 11];
+                        case 4: return [3 /*break*/, 12];
                         case 5:
                             if (!(effect.type === 'ctx')) return [3 /*break*/, 9];
-                            context = handlers[effect.name];
                             if (!handlers.hasOwnProperty(effect.name)) return [3 /*break*/, 6];
+                            context = handlers[effect.name];
                             result = gen.next(context);
                             return [3 /*break*/, 8];
                         case 6:
@@ -186,15 +192,19 @@ var Eff = /** @class */ (function () {
                         case 7:
                             result = _d.apply(_c, [_g.sent()]);
                             _g.label = 8;
-                        case 8: return [3 /*break*/, 11];
+                        case 8: return [3 /*break*/, 12];
                         case 9:
+                            if (!(effect.type === 'async')) return [3 /*break*/, 11];
                             _f = (_e = gen).next;
                             return [4 /*yield*/, effect];
                         case 10:
                             result = _f.apply(_e, [_g.sent()]);
-                            _g.label = 11;
-                        case 11: return [3 /*break*/, 1];
-                        case 12: return [2 /*return*/, result.value];
+                            return [3 /*break*/, 12];
+                        case 11:
+                            effect;
+                            throw new Error("Unexpected effect: ".concat(JSON.stringify(effect, null, 2)));
+                        case 12: return [3 /*break*/, 1];
+                        case 13: return [2 /*return*/, result.value];
                     }
                 });
             },

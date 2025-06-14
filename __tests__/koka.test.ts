@@ -106,7 +106,8 @@ describe('Eff.try/catch', () => {
 
     it('should handle multiple catches', () => {
         function* test() {
-            yield* Eff.err('FirstError').throw('first error')
+            // yield* Eff.ctx('TestCtx').get<() => 1>()
+            yield* Eff.err('FirstError').throw<void | string>('first error')
             yield* Eff.err('SecondError').throw('second error')
             return 'should not reach here'
         }
@@ -114,9 +115,10 @@ describe('Eff.try/catch', () => {
         const program = Eff.try(test()).catch({
             FirstError: (error) => `Caught first: ${error}`,
             SecondError: (error) => `Caught second: ${error}`,
+            TestCtx: () => 1,
         })
 
-        const result = Eff.run(program)
+        const result = Eff.runAsync(program)
         expect(result).toBe('Caught first: first error')
     })
 
@@ -137,20 +139,6 @@ describe('Eff.try/catch', () => {
         )
         expect(result).toBe('Caught inner: inner error')
     })
-
-    // it('should catch promise via async handler', async () => {
-    //     function* test() {
-    //         const value = yield* Eff.await(Promise.reject('Async error'))
-    //         return value
-    //     }
-
-    //     const program = Eff.try(test()).catch({
-    //         async: (promise) => `Caught async: ${promise}`,
-    //     })
-
-    //     const result = Eff.run(program)
-    //     expect(result).toBe('Caught async: Async error')
-    // })
 })
 
 describe('Eff.run', () => {
