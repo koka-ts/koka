@@ -106,7 +106,7 @@ describe('Eff.try/catch', () => {
 
     it('should handle multiple catches', () => {
         function* test() {
-            // yield* Eff.ctx('TestCtx').get<() => 1>()
+            yield* Eff.ctx('TestCtx').get<() => 1>()
             yield* Eff.err('FirstError').throw<void | string>('first error')
             yield* Eff.err('SecondError').throw('second error')
             return 'should not reach here'
