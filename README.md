@@ -146,6 +146,44 @@ const result = await Eff.run(
 
 ## Advanced Usage
 
+### Design-First Effect Definition
+
+Koka encourages a design-first approach where you define your error and context types upfront before using them in your application:
+
+```typescript
+// predefined error effects
+class UserNotFoundErr extends Eff.Err('UserNotFound')<string> {}
+class UserInvalidErr extends Eff.Err('UserInvalid')<{ reason: string }> {}
+
+// predefined context effects
+class AuthTokenCtx extends Eff.Ctx('AuthToken')<string> {}
+class UserIdCtx extends Eff.Ctx('UserId')<string> {}
+
+// Helper functions using the defined types
+function* requireUserId() {
+    const userId = yield* Eff.get(new UserIdCtx())
+    if (!userId) {
+        yield* Eff.throw(new UserInvalidErr({ reason: 'Missing user ID' }))
+    }
+    return userId
+}
+
+function* getUser() {
+    const userId = yield* requireUserId()
+    // ... fetch user logic
+}
+
+// Usage
+const result = Eff.run(
+    Eff.try(getUser()).catch({
+        UserId: '123',
+        AuthToken: 'abc',
+        UserInvalid: (error) => console.error('Invalid user:', error),
+        UserNotFound: (error) => console.error('User not found:', error),
+    }),
+)
+```
+
 ### interpolating between error effects and result types
 
 You can move all error effects in a generator function from `effect position` to `return position` via using `Eff.result`.
@@ -197,6 +235,32 @@ if (finalResult.type === 'ok') {
 -   `Eff.result(generator)`:
 -   `Eff.ok(generator)`: Unwraps Ok results
 -   `Eff.runResult(generator)`: Runs a generator and returns a Result type
+
+### Effect Classes
+
+-   `Eff.Err(name)<Error>`: Creates an error effect class
+    ```typescript
+    const MyError = Eff.Err('MyError')<string>
+    const error = new MyError('message')
+    ```
+-   `Eff.Ctx(name)<Context>`: Creates a context effect class
+    ```typescript
+    const MyContext = Eff.Ctx('MyContext')<number>
+    const ctx = new MyContext()
+    ```
+
+### Effect Operations
+
+-   `Eff.throw(err: Err)`: Throws a predefined error effect
+
+    ```typescript
+    yield * Eff.throw(new MyError('error'))
+    ```
+
+-   `Eff.get(ctx: Ctx)`: Gets a value from predefined context
+    ```typescript
+    const value = yield * Eff.get(new MyContext())
+    ```
 
 ### Result
 

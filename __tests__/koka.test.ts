@@ -163,6 +163,25 @@ describe('Eff.run', () => {
         const result = await Eff.run(test())
         expect(result).toBe(42)
     })
+
+    it('should handle errors in async effects', async () => {
+        function* testThrow() {
+            yield* Eff.await(Promise.reject(new Error('Async error')))
+        }
+
+        function* test() {
+            try {
+                yield* testThrow()
+            } catch (err) {
+                if (err instanceof Error) {
+                    return `Caught: ${err.message}`
+                }
+            }
+        }
+
+        const result = await Eff.run(test())
+        expect(result).toBe('Caught: Async error')
+    })
 })
 
 describe('Eff.result', () => {
@@ -327,6 +346,96 @@ describe('Complex scenarios', () => {
     })
 })
 
+describe('Eff.Ctx/Eff.Err', () => {
+    it('should create context effect class', () => {
+        class TestCtx extends Eff.Ctx('TestCtx')<number> {}
+
+        const ctx = new TestCtx()
+        ctx.context = 42
+
+        expect(ctx.type).toBe('ctx')
+        expect(ctx.name).toBe('TestCtx')
+        expect(ctx.context).toBe(42)
+    })
+
+    it('should create error effect class', () => {
+        class TestErr extends Eff.Err('TestErr')<string> {}
+        const err = new TestErr('error')
+
+        expect(err.type).toBe('err')
+        expect(err.name).toBe('TestErr')
+        expect(err.error).toBe('error')
+    })
+})
+
+describe('Eff.throw', () => {
+    it('should throw error effect', () => {
+        class TestErr extends Eff.Err('TestErr')<string> {}
+
+        function* test() {
+            yield* Eff.throw(new TestErr('error'))
+            return 'should not reach here'
+        }
+
+        const result = Eff.run(Eff.result(test()))
+
+        expect(result).toEqual(new TestErr('error'))
+    })
+
+    it('should propagate error through nested calls', () => {
+        const TestErr = Eff.Err('TestErr')<string>
+
+        function* inner() {
+            yield* Eff.throw(new TestErr('inner error'))
+            return 'should not reach here'
+        }
+
+        function* outer() {
+            return yield* inner()
+        }
+
+        const result = Eff.run(Eff.result(outer()))
+        expect(result).toEqual(new TestErr('inner error'))
+    })
+})
+
+describe('Eff.get', () => {
+    it('should get context value', () => {
+        const TestCtx = Eff.Ctx('TestCtx')<number>
+
+        function* test() {
+            const value = yield* Eff.get(new TestCtx())
+            return value * 2
+        }
+
+        const program = Eff.try(test()).catch({
+            TestCtx: 42,
+        })
+
+        const result = Eff.run(program)
+        expect(result).toBe(84)
+    })
+
+    it('should propagate context when not handled', () => {
+        const TestCtx = Eff.Ctx('TestCtx')<number>
+
+        function* inner() {
+            return yield* Eff.get(new TestCtx())
+        }
+
+        function* outer() {
+            return yield* inner()
+        }
+
+        const program = Eff.try(outer()).catch({
+            TestCtx: 42,
+        })
+
+        const result = Eff.run(program)
+        expect(result).toBe(42)
+    })
+})
+
 describe('helpers', () => {
     it('should check if value is a generator', () => {
         function* gen() {}
@@ -334,5 +443,58 @@ describe('helpers', () => {
 
         expect(isGenerator(gen())).toBe(true)
         expect(isGenerator(notGen())).toBe(false)
+    })
+})
+
+describe('design first approach', () => {
+    // predefined error effects
+    class UserNotFoundErr extends Eff.Err('UserNotFound')<string> {}
+    class UserInvalidErr extends Eff.Err('UserInvalid')<{ reason: string }> {}
+
+    // predefined context effects
+    class AuthTokenCtx extends Eff.Ctx('AuthToken')<string> {}
+    class UserIdCtx extends Eff.Ctx('UserId')<string> {}
+
+    // Helper functions using the defined types
+    function* requireUserId() {
+        const userId = yield* Eff.get(new UserIdCtx())
+
+        if (!userId) {
+            yield* Eff.throw(new UserInvalidErr({ reason: 'Missing user ID' }))
+        }
+
+        return userId
+    }
+
+    function* getUser() {
+        const userId = yield* requireUserId()
+
+        const authToken = yield* Eff.get(new AuthTokenCtx())
+
+        if (!authToken) {
+            yield* Eff.throw(new UserInvalidErr({ reason: 'Missing auth token' }))
+        }
+
+        // Simulate fetching user logic
+        const user: { id: string; name: string } | null = yield* Eff.await(null)
+
+        if (!user) {
+            yield* Eff.throw(new UserNotFoundErr(`User with ID ${userId} not found`))
+        }
+
+        return user
+    }
+
+    it('should support design first approach', async () => {
+        const program = Eff.try(getUser()).catch({
+            UserNotFound: (error) => `Error: ${error}`,
+            UserInvalid: (error) => `Invalid user: ${JSON.stringify(error)}`,
+            AuthToken: 'valid-token',
+            UserId: '12345',
+        })
+
+        const result = await Eff.run(program)
+
+        expect(result).toBe('Error: User with ID 12345 not found')
     })
 })

@@ -25,7 +25,7 @@ module.exports = {
     },
     displayName: {
         name: 'koka',
-        color: 'green',
+        color: 'purple',
     },
     collectCoverageFrom: ['src/**/*.{ts,tsx}'],
     rootDir: __dirname,

@@ -13,7 +13,7 @@ export type CtxSymbol = typeof ctxSymbol
 export type Ctx<Name extends string, T> = {
     type: 'ctx'
     name: Name
-    [ctxSymbol]?: T
+    context: CtxSymbol | T
 }
 
 export type AnyCtx = Ctx<string, any>
@@ -83,8 +83,27 @@ export type MaybePromise<T> = T extends Promise<any> ? T : T | Promise<T>
 
 export type MaybeFunction<T> = T | (() => T)
 
+function Ctx<const Name extends string>(name: Name) {
+    return class Eff<T> {
+        type = 'ctx' as const
+        name = name
+        context = ctxSymbol as CtxSymbol | T
+    }
+}
+
+function Err<const Name extends string>(name: Name) {
+    return class Eff<E = void> {
+        type = 'err' as const
+        name = name
+        error: E
+        constructor(error: E) {
+            this.error = error
+        }
+    }
+}
+
 export class Eff {
-    static err = <Name extends string>(name: Name) => {
+    static err = <const Name extends string>(name: Name) => {
         return {
             *throw<E = void>(...args: E extends void ? [] : [E]): Generator<Err<Name, E>, never> {
                 yield {
@@ -97,18 +116,37 @@ export class Eff {
             },
         }
     }
-    static ctx = <Name extends string>(name: Name) => {
+
+    static Err = Err
+
+    static *throw<E extends AnyErr>(err: E): Generator<E, never> {
+        yield err
+        /* istanbul ignore next */
+        throw new Error(`Unexpected resumption of error effect [${err.name}]`)
+    }
+
+    static ctx = <const Name extends string>(name: Name) => {
         return {
             *get<T>(): Generator<Ctx<Name, T>, T> {
                 const context = yield {
                     type: 'ctx',
                     name,
+                    context: ctxSymbol,
                 }
 
                 return context as T
             },
         }
     }
+
+    static Ctx = Ctx
+
+    static *get<C extends AnyCtx>(ctx: C): Generator<C, Exclude<C['context'], CtxSymbol>> {
+        const context = yield ctx as C
+
+        return context as Exclude<C['context'], CtxSymbol>
+    }
+
     static try = <Yield extends AnyEff, Return>(input: MaybeFunction<Generator<Yield, Return>>) => {
         return {
             *catch<Handlers extends Partial<EffectHandlers<Yield>>>(
@@ -159,9 +197,14 @@ export class Eff {
                 const effect = result.value
 
                 if (effect.type === 'async') {
-                    return effect.value.then((value) => {
-                        return process(gen.next(value))
-                    }) as MaybePromise<Return>
+                    return effect.value.then(
+                        (value) => {
+                            return process(gen.next(value))
+                        },
+                        (error) => {
+                            return process(gen.throw(error))
+                        },
+                    ) as MaybePromise<Return>
                 } else {
                     throw new Error(`Expected async effect, but got: ${JSON.stringify(effect, null, 2)}`)
                 }
