@@ -1,5 +1,11 @@
 # Koka - Lightweight 3kB Effect-TS alternative library based on Algebraic Effects
 
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/koka-ts/koka)
+[![npm](https://img.shields.io/npm/v/koka.svg?style=flat-square)](https://www.npmjs.com/package/koka)
+[![GitHub License](https://img.shields.io/github/license/koka-ts/koka.svg?style=flat-square)](https://github.com/koka-ts/koka/blob/main/LICENSE)
+[![GitHub Workflow Status](https://img.shields.io/github/workflow/status/koka-ts/koka/CI?style=flat-square)](https://github.com/koka-ts/koka/actions)
+[![TypeScript](https://img.shields.io/badge/-TypeScript-3178C6.svg?style=flat-square&logo=typescript)](https://www.typescriptlang.org/)
+
 **Warning: This library is in early development and may change significantly. Do not use in production yet.**
 
 Koka is a minimal yet powerful effects library for TypeScript that provides structured error handling, context management, and async operations in a composable, type-safe manner.
