@@ -79,6 +79,24 @@ export const Result = {
 
 type InferOkValue<T> = T extends Ok<infer U> ? U : never
 
+type MaybeGenerator<T, R> = Generator<T, R> | (() => Generator<T, R>)
+
+type ExtractEff<Effects> = Effects extends []
+    ? never
+    : Effects extends [infer First, ...infer Rest]
+    ? First extends MaybeFunction<Generator<infer E, any>>
+        ? E | ExtractEff<Rest>
+        : never
+    : never
+
+type ExtractReturn<Effects> = Effects extends []
+    ? []
+    : Effects extends [infer First, ...infer Rest]
+    ? First extends MaybeFunction<Generator<any, infer R>>
+        ? [R, ...ExtractReturn<Rest>]
+        : never
+    : never
+
 export type MaybePromise<T> = T extends Promise<any> ? T : T | Promise<T>
 
 export type MaybeFunction<T> = T | (() => T)
@@ -147,6 +165,89 @@ export class Eff {
         return context as Exclude<C['context'], CtxSymbol>
     }
 
+    static *all<const Effects extends MaybeGenerator<AnyEff, unknown>[]>(
+        effects: Effects,
+    ): Generator<ExtractEff<Effects>, ExtractReturn<Effects>> {
+        type ProcessingItem = {
+            gen: Generator<AnyEff, unknown>
+            index: number
+        }
+
+        type ProcessedResult = {
+            item: ProcessingItem
+            result: IteratorResult<AnyEff, unknown>
+        }
+
+        const results: unknown[] = []
+
+        const items = effects.map((effect, index): ProcessingItem => {
+            const gen = typeof effect === 'function' ? effect() : effect
+            return {
+                gen,
+                index,
+            }
+        })
+
+        const promises: Promise<void>[] = []
+
+        const wrapPromise = <T>(promise: Promise<T>, item: ProcessingItem): Promise<void> => {
+            const wrappedPromise: Promise<void> = promise.then(
+                (value) => {
+                    promises.splice(promises.indexOf(wrappedPromise), 1)
+                    processedResults.push({ item, result: item.gen.next(value) })
+                },
+                (error) => {
+                    promises.splice(promises.indexOf(wrappedPromise), 1)
+                    processedResults.push({ item, result: item.gen.throw(error) })
+                },
+            )
+
+            promises.push(wrappedPromise)
+
+            return wrappedPromise
+        }
+
+        function* processItem({ result, item }: ProcessedResult): Generator<any, void, unknown> {
+            while (!result.done) {
+                const effect = result.value
+
+                if (effect.type === 'async') {
+                    wrapPromise(effect.value, item)
+                    return
+                } else {
+                    result = item.gen.next(yield effect)
+                }
+            }
+
+            results[item.index] = result.value
+        }
+
+        const processedResults: ProcessedResult[] = items.map((item) => {
+            return {
+                item,
+                result: item.gen.next(),
+            }
+        })
+
+        while (processedResults.length > 0) {
+            const processedResult = processedResults.shift()!
+
+            yield* processItem(processedResult)
+        }
+
+        while (promises.length > 0) {
+            yield* Eff.await(Promise.race(promises)) as any
+
+            while (processedResults.length > 0) {
+                const processedResult = processedResults.shift()!
+
+                yield* processItem(processedResult)
+            }
+        }
+
+        return results as ExtractReturn<Effects>
+    }
+
     static try = <Yield extends AnyEff, Return>(input: MaybeFunction<Generator<Yield, Return>>) => {
         return {
             *catch<Handlers extends Partial<EffectHandlers<Yield>>>(
@@ -192,6 +293,8 @@ export class Eff {
     static run<Return>(input: MaybeFunction<Generator<never, Return>>): Return
     static run<Return>(input: MaybeFunction<Generator<Async, Return>>): MaybePromise<Return>
     static run<Return>(input: MaybeFunction<Generator<Async, Return>>): MaybePromise<Return> {
+        const gen = typeof input === 'function' ? input() : input
+
         const process = (result: IteratorResult<Async, Return>): MaybePromise<Return> => {
             if (!result.done) {
                 const effect = result.value
@@ -212,8 +315,6 @@ export class Eff {
 
             return result.value as MaybePromise<Return>
         }
-
-        const gen = typeof input === 'function' ? input() : input
 
         return process(gen.next())
     }

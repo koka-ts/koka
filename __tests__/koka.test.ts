@@ -1,4 +1,4 @@
-import { Eff, Err, Ctx, Result, isGenerator } from '../src/koka'
+import { Eff, Err, Ctx, Result, isGenerator, Async } from '../src/koka'
 
 describe('Result', () => {
     it('should create ok result', () => {
@@ -443,6 +443,230 @@ describe('helpers', () => {
 
         expect(isGenerator(gen())).toBe(true)
         expect(isGenerator(notGen())).toBe(false)
+    })
+})
+
+describe('Eff.all', () => {
+    it('should handle sync effects', () => {
+        function* effect1() {
+            return 1
+        }
+
+        function* effect2() {
+            return '2'
+        }
+
+        function* program() {
+            const combined: Generator<never, [number, string]> = Eff.all([effect1(), effect2()])
+            const results = yield* combined
+            return results[0] + Number(results[1])
+        }
+
+        const result = Eff.run(program())
+        expect(result).toBe(3)
+    })
+
+    it('should handle async effects', async () => {
+        function* effect1() {
+            return yield* Eff.await(Promise.resolve(1))
+        }
+
+        function* effect2() {
+            return yield* Eff.await(Promise.resolve('2'))
+        }
+
+        function* program() {
+            const combined: Generator<Async, [number, string]> = Eff.all([effect1(), effect2()])
+            const results = yield* combined
+
+            console.log('results', results)
+
+            return results[0] + Number(results[1])
+        }
+
+        const result = await Eff.run(program())
+        expect(result).toBe(3)
+    })
+
+    it('should handle mixed sync/async effects', async () => {
+        function* syncEffect() {
+            return 1
+        }
+
+        function* asyncEffect() {
+            return yield* Eff.await(Promise.resolve(2))
+        }
+
+        function* program() {
+            const combined: Generator<Async, [number, number]> = Eff.all([syncEffect(), asyncEffect()])
+            const results = yield* combined
+            return results[0] + results[1]
+        }
+
+        const result = await Eff.run(program())
+        expect(result).toBe(3)
+    })
+
+    it('should handle errors in effects', () => {
+        class TestErr extends Eff.Err('TestErr')<string> {}
+
+        function* effect1() {
+            return 1
+        }
+
+        function* effect2() {
+            yield* Eff.throw(new TestErr('error'))
+            return 2
+        }
+
+        function* program() {
+            const combined: Generator<TestErr, [number, number]> = Eff.all([effect1(), effect2()])
+            const results = yield* combined
+            return results[0] + results[1]
+        }
+
+        const result = Eff.run(Eff.result(program()))
+
+        expect(result).toEqual({
+            type: 'err',
+            name: 'TestErr',
+            error: 'error',
+        })
+    })
+
+    it('should handle multiple async effects and run concurrently', async () => {
+        async function delayTime(ms: number): Promise<void> {
+            return new Promise((resolve) => setTimeout(resolve, ms))
+        }
+
+        function* delayedEffect<T>(value: T, delay: number) {
+            if (delay === 0) {
+                yield* Eff.err('DelayError').throw('Delay cannot be zero')
+            }
+
+            yield* Eff.await(delayTime(delay))
+
+            return value
+        }
+
+        function* program() {
+            const combined: Generator<Async | Err<'DelayError', string>, [number, string, boolean]> = Eff.all([
+                delayedEffect(1, 30),
+                delayedEffect('2', 20),
+                delayedEffect(false, 10),
+            ])
+
+            const results = yield* combined
+            return results
+        }
+
+        const start = Date.now()
+        const result = await Eff.runResult(program())
+        const duration = Date.now() - start
+
+        expect(result).toEqual({
+            type: 'ok',
+            value: [1, '2', false],
+        })
+
+        // Should run program in parallel
+        expect(duration).toBeLessThan(50) // Should complete in less than 50ms
+    })
+
+    it('should handle empty array', () => {
+        function* program(): Generator<never, []> {
+            const results = yield* Eff.all([])
+            return results
+        }
+
+        const result = Eff.run(program())
+        expect(result).toEqual([])
+    })
+
+    it('should handle function effects', () => {
+        function* effect1(): Generator<never, number> {
+            return 1
+        }
+
+        function* effect2(): Generator<never, number> {
+            return 2
+        }
+
+        function* program(): Generator<never, number> {
+            const results = yield* Eff.all([() => effect1(), () => effect2()])
+            return results[0] + results[1]
+        }
+
+        const result = Eff.run(program())
+        expect(result).toBe(3)
+    })
+
+    it('should handle async errors with native try-catch', async () => {
+        function* effectWithError(): Generator<Async, number> {
+            const value = yield* Eff.await(Promise.reject(new Error('Async error')))
+            return value
+        }
+
+        function* program() {
+            try {
+                const results = yield* Eff.all([effectWithError(), Eff.await(Promise.resolve(2))])
+                return results[0] + results[1]
+            } catch (err: unknown) {
+                return err as Error
+            }
+        }
+
+        const result = await Eff.run(program())
+
+        expect(result).toBeInstanceOf(Error)
+        expect((result as Error).message).toBe('Async error')
+    })
+
+    it('should propagate async errors', async () => {
+        function* failingEffect(): Generator<Async, never> {
+            yield* Eff.await(Promise.reject(new Error('Async error')))
+            /* istanbul ignore next */
+            throw new Error('Should not reach here')
+        }
+
+        function* program(): Generator<Async, number> {
+            const results = yield* Eff.all([failingEffect(), Eff.await(Promise.resolve(2))])
+            return results[0] + results[1]
+        }
+
+        await expect(Eff.run(program())).rejects.toThrow('Async error')
+    })
+
+    it('should handle thrown errors in async effects', async () => {
+        function* effectWithThrow(): Generator<Async, number> {
+            const value = yield* Eff.await(
+                new Promise<number>((_, reject) => {
+                    setTimeout(() => {
+                        try {
+                            throw new Error('Thrown error')
+                        } catch (err) {
+                            reject(err)
+                        }
+                    }, 10)
+                }),
+            )
+            return value
+        }
+
+        function* program(): Generator<Async, number> {
+            try {
+                const results = yield* Eff.all([effectWithThrow(), Eff.await(Promise.resolve(2))])
+                return results[0] + results[1]
+            } catch (err) {
+                if (err instanceof Error) {
+                    return -100
+                }
+                throw err
+            }
+        }
+
+        const result = await Eff.run(program())
+        expect(result).toBe(-100)
     })
 })
 
