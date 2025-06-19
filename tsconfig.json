@@ -18,5 +18,5 @@
         "stripInternal": true,
         "lib": ["ESNext", "DOM"]
     },
-    "include": ["./src"]
+    "include": ["./src", "./__tests__"]
 }

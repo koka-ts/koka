@@ -70,7 +70,18 @@ describe('Eff.ctx', () => {
     })
 })
 
-describe('Eff.try/catch', () => {
+describe('Eff.try', () => {
+    it('should throw for unhandled effect types', () => {
+        function* test() {
+            yield { type: 'unknown' } as any
+            return 'should not reach here'
+        }
+
+        expect(() => {
+            Eff.run(Eff.try(test()).catch({}))
+        }).toThrow(/Unexpected effect/)
+    })
+
     it('should catch error effect', () => {
         function* test() {
             yield* Eff.err('TestError').throw('error')
@@ -118,7 +129,7 @@ describe('Eff.try/catch', () => {
             TestCtx: () => 1,
         })
 
-        const result = Eff.runAsync(program)
+        const result = Eff.runSync(program)
         expect(result).toBe('Caught first: first error')
     })
 
@@ -149,7 +160,7 @@ describe('Eff.run', () => {
             return value * syncValue
         }
 
-        const result = await Eff.run(test())
+        const result = await Eff.runAsync(test())
         expect(result).toBe(84)
     })
 
@@ -181,6 +192,63 @@ describe('Eff.run', () => {
 
         const result = await Eff.run(test())
         expect(result).toBe('Caught: Async error')
+    })
+
+    it('should throw error when received unexpected effect type', () => {
+        class TestErr extends Eff.Err('TestErr')<string> {}
+        class TestCtx extends Eff.Ctx('TestCtx')<string> {}
+        class TestOpt extends Eff.Opt('TestOpt')<string> {}
+
+        function* testErr(): Generator<TestErr, string> {
+            yield* Eff.throw(new TestErr('error'))
+            return 'should not reach here'
+        }
+
+        function* testCtx(): Generator<TestCtx, string> {
+            const ctx = yield* Eff.get(TestCtx)
+            return ctx
+        }
+
+        function* testOpt(): Generator<TestOpt, string> {
+            const opt = yield* Eff.get(TestOpt)
+            return opt ?? 'default'
+        }
+
+        // @ts-expect-error
+        expect(() => Eff.run(testErr())).toThrow(/\w+/)
+        // @ts-expect-error
+        expect(() => Eff.run(testCtx())).toThrow(/\w+/)
+
+        expect(Eff.run(testOpt())).toBe('default')
+
+        expect(
+            Eff.run(
+                Eff.try(testOpt()).catch({
+                    TestOpt: 'custom value',
+                }),
+            ),
+        ).toBe('custom value')
+    })
+})
+
+describe('Eff.runSync', () => {
+    it('should run sync effects', () => {
+        function* test() {
+            return 42
+        }
+
+        const result = Eff.runSync(test())
+        expect(result).toBe(42)
+    })
+
+    it('should throw for async effects', () => {
+        function* test(): Generator<Async, number> {
+            yield* Eff.await(Promise.resolve(42))
+            return 42
+        }
+
+        // @ts-expect-error
+        expect(() => Eff.runSync(test())).toThrow(/Expected synchronous effect, but got asynchronous effect/)
     })
 })
 
@@ -404,7 +472,7 @@ describe('Eff.get', () => {
         const TestCtx = Eff.Ctx('TestCtx')<number>
 
         function* test() {
-            const value = yield* Eff.get(new TestCtx())
+            const value = yield* Eff.get(TestCtx)
             return value * 2
         }
 
@@ -420,7 +488,7 @@ describe('Eff.get', () => {
         const TestCtx = Eff.Ctx('TestCtx')<number>
 
         function* inner() {
-            return yield* Eff.get(new TestCtx())
+            return yield* Eff.get(TestCtx)
         }
 
         function* outer() {
@@ -670,6 +738,48 @@ describe('Eff.all', () => {
     })
 })
 
+describe('Eff.opt', () => {
+    it('should return undefined when no value provided', () => {
+        function* test() {
+            return yield* Eff.ctx('TestOpt').opt<number>()
+        }
+
+        const result = Eff.run(test())
+        expect(result).toBeUndefined()
+    })
+
+    it('should return value when provided', () => {
+        function* test() {
+            const optValue = yield* Eff.ctx('TestOpt').opt<number>()
+            return optValue ?? 42
+        }
+
+        const result = Eff.run(Eff.try(test()).catch({ TestOpt: 21 }))
+        expect(result).toBe(21)
+    })
+
+    it('should work with async effects', async () => {
+        function* test() {
+            const optValue = yield* Eff.ctx('TestOpt').opt<number>()
+            const asyncValue = yield* Eff.await(Promise.resolve(optValue ?? 42))
+            return asyncValue
+        }
+
+        const result = await Eff.run(test())
+        expect(result).toBe(42)
+    })
+
+    it('should handle undefined context value', () => {
+        function* test() {
+            const optValue = yield* Eff.ctx('TestOpt').opt<number>()
+            return optValue ?? 100
+        }
+
+        const result = Eff.run(Eff.try(test()).catch({ TestOpt: undefined }))
+        expect(result).toBe(100)
+    })
+})
+
 describe('design first approach', () => {
     // predefined error effects
     class UserNotFoundErr extends Eff.Err('UserNotFound')<string> {}
@@ -679,13 +789,20 @@ describe('design first approach', () => {
     class AuthTokenCtx extends Eff.Ctx('AuthToken')<string> {}
     class UserIdCtx extends Eff.Ctx('UserId')<string> {}
 
+    // predefined option effects
+    class LoggerOpt extends Eff.Opt('Logger')<(message: string) => void> {}
+
     // Helper functions using the defined types
     function* requireUserId() {
-        const userId = yield* Eff.get(new UserIdCtx())
+        const logger = yield* Eff.get(LoggerOpt)
+        const userId = yield* Eff.get(UserIdCtx)
 
         if (!userId) {
-            yield* Eff.throw(new UserInvalidErr({ reason: 'Missing user ID' }))
+            logger?.('User ID is missing, throwing UserInvalidErr')
+            throw yield* Eff.throw(new UserInvalidErr({ reason: 'Missing user ID' }))
         }
+
+        logger?.(`User ID: ${userId}`)
 
         return userId
     }
@@ -693,7 +810,7 @@ describe('design first approach', () => {
     function* getUser() {
         const userId = yield* requireUserId()
 
-        const authToken = yield* Eff.get(new AuthTokenCtx())
+        const authToken = yield* Eff.get(AuthTokenCtx)
 
         if (!authToken) {
             yield* Eff.throw(new UserInvalidErr({ reason: 'Missing auth token' }))
@@ -720,5 +837,38 @@ describe('design first approach', () => {
         const result = await Eff.run(program)
 
         expect(result).toBe('Error: User with ID 12345 not found')
+    })
+
+    it('should support optional effects', async () => {
+        const logs = [] as string[]
+        const logger = (message: string) => {
+            logs.push(message)
+        }
+
+        let result = await Eff.run(
+            Eff.try(getUser()).catch({
+                UserNotFound: (error) => `Error: ${error}`,
+                UserInvalid: (error) => `Invalid user: ${JSON.stringify(error, null, 2)}`,
+                AuthToken: 'valid-token',
+                UserId: '12345',
+                Logger: logger,
+            }),
+        )
+
+        expect(result).toBe('Error: User with ID 12345 not found')
+        expect(logs).toEqual(['User ID: 12345'])
+
+        result = await Eff.run(
+            Eff.try(getUser()).catch({
+                UserNotFound: (error) => `Error: ${error}`,
+                UserInvalid: (error) => `Invalid user: ${JSON.stringify(error, null, 2)}`,
+                AuthToken: 'valid-token',
+                UserId: '', // Simulate missing user ID
+                Logger: logger,
+            }),
+        )
+
+        expect(result).toBe(`Invalid user: ${JSON.stringify({ reason: 'Missing user ID' }, null, 2)}`)
+        expect(logs).toEqual(['User ID: 12345', 'User ID is missing, throwing UserInvalidErr'])
     })
 })

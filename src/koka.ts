@@ -6,14 +6,19 @@ export type Err<Name extends string, T> = {
 
 export type AnyErr = Err<string, any>
 
-export const ctxSymbol = Symbol('ctx')
+export const EffSymbol = Symbol('ctx')
 
-export type CtxSymbol = typeof ctxSymbol
+export type EffSymbol = typeof EffSymbol
 
 export type Ctx<Name extends string, T> = {
     type: 'ctx'
     name: Name
-    context: CtxSymbol | T
+    context: EffSymbol | T
+    optional?: true
+}
+
+export type Opt<Name extends string, T> = Ctx<Name, T> & {
+    optional: true
 }
 
 export type AnyCtx = Ctx<string, any>
@@ -21,10 +26,12 @@ export type AnyCtx = Ctx<string, any>
 export type Async = {
     type: 'async'
     name?: undefined
-    value: Promise<unknown>
+    promise: Promise<unknown>
 }
 
-export type EffType<T> = Err<string, T> | Ctx<string, T> | Async
+export type AnyOpt = Opt<string, any>
+
+export type EffType<T> = Err<string, T> | Ctx<string, T> | Opt<string, T> | Async
 
 export type AnyEff = EffType<any>
 
@@ -105,7 +112,8 @@ function Ctx<const Name extends string>(name: Name) {
     return class Eff<T> {
         type = 'ctx' as const
         name = name
-        context = ctxSymbol as CtxSymbol | T
+        context = EffSymbol as EffSymbol | T
+        optional?: true
     }
 }
 
@@ -119,6 +127,16 @@ function Err<const Name extends string>(name: Name) {
         }
     }
 }
+
+function Opt<const Name extends string>(name: Name) {
+    return class Eff<T> extends Ctx(name)<T> {
+        optional = true as const
+    }
+}
+
+export type CtxValue<C extends AnyCtx> = C['optional'] extends true
+    ? Exclude<C['context'], EffSymbol> | undefined
+    : Exclude<C['context'], EffSymbol>
 
 export class Eff {
     static err = <const Name extends string>(name: Name) => {
@@ -149,20 +167,31 @@ export class Eff {
                 const context = yield {
                     type: 'ctx',
                     name,
-                    context: ctxSymbol,
+                    context: EffSymbol,
                 }
 
                 return context as T
+            },
+            *opt<T>(): Generator<Opt<Name, T>, T | undefined> {
+                const context = yield {
+                    type: 'ctx',
+                    name,
+                    context: EffSymbol,
+                    optional: true,
+                }
+
+                return context as T | undefined
             },
         }
     }
 
     static Ctx = Ctx
+    static Opt = Opt
 
-    static *get<C extends AnyCtx>(ctx: C): Generator<C, Exclude<C['context'], CtxSymbol>> {
-        const context = yield ctx as C
+    static *get<C extends AnyCtx>(ctx: C | (new () => C)): Generator<C, CtxValue<C>> {
+        const context = yield typeof ctx === 'function' ? new ctx() : ctx
 
-        return context as Exclude<C['context'], CtxSymbol>
+        return context as CtxValue<C>
     }
 
     static *all<const Effects extends MaybeGenerator<AnyEff, unknown>[]>(
@@ -212,7 +241,7 @@ export class Eff {
                 const effect = result.value
 
                 if (effect.type === 'async') {
-                    wrapPromise(effect.value, item)
+                    wrapPromise(effect.promise, item)
                     return
                 } else {
                     result = item.gen.next(yield effect)
@@ -271,8 +300,9 @@ export class Eff {
                             result = gen.next(yield effect as any)
                         }
                     } else if (effect.type === 'ctx') {
-                        if (handlers.hasOwnProperty(effect.name)) {
-                            const context = handlers[effect.name as keyof Handlers]
+                        const context = handlers[effect.name as keyof Handlers]
+
+                        if (context !== undefined) {
                             result = gen.next(context)
                         } else {
                             result = gen.next(yield effect as any)
@@ -290,17 +320,17 @@ export class Eff {
         }
     }
 
-    static run<Return>(input: MaybeFunction<Generator<never, Return>>): Return
-    static run<Return>(input: MaybeFunction<Generator<Async, Return>>): MaybePromise<Return>
-    static run<Return>(input: MaybeFunction<Generator<Async, Return>>): MaybePromise<Return> {
+    static run<Return>(input: MaybeFunction<Generator<AnyOpt, Return>>): Return
+    static run<Return>(input: MaybeFunction<Generator<Async | AnyOpt, Return>>): MaybePromise<Return>
+    static run<Return>(input: MaybeFunction<Generator<Async | AnyOpt, Return>>): MaybePromise<Return> {
         const gen = typeof input === 'function' ? input() : input
 
-        const process = (result: IteratorResult<Async, Return>): MaybePromise<Return> => {
-            if (!result.done) {
+        const process = (result: IteratorResult<Async | AnyOpt, Return>): MaybePromise<Return> => {
+            while (!result.done) {
                 const effect = result.value
 
                 if (effect.type === 'async') {
-                    return effect.value.then(
+                    return effect.promise.then(
                         (value) => {
                             return process(gen.next(value))
                         },
@@ -308,6 +338,13 @@ export class Eff {
                             return process(gen.throw(error))
                         },
                     ) as MaybePromise<Return>
+                } else if (effect.type === 'ctx') {
+                    if (!effect.optional) {
+                        throw new Error(
+                            `Expected optional ctx, but got non-optional ctx: ${JSON.stringify(effect, null, 2)}`,
+                        )
+                    }
+                    result = gen.next()
                 } else {
                     throw new Error(`Expected async effect, but got: ${JSON.stringify(effect, null, 2)}`)
                 }
@@ -319,12 +356,18 @@ export class Eff {
         return process(gen.next())
     }
 
-    static runSync<Return>(effect: MaybeFunction<Generator<never, Return>>): Return {
-        return this.run(effect)
+    static runSync<Return>(effect: MaybeFunction<Generator<AnyOpt, Return>>): Return {
+        const result = this.run(effect)
+
+        if (result instanceof Promise) {
+            throw new Error('Expected synchronous effect, but got asynchronous effect')
+        }
+
+        return result
     }
 
-    static runAsync<Return>(input: MaybeFunction<Generator<Async, Return>>): MaybePromise<Return> {
-        return this.run(input)
+    static runAsync<Return>(input: MaybeFunction<Generator<Async | AnyOpt, Return>>): Promise<Return> {
+        return Promise.resolve(this.run(input))
     }
 
     static runResult<Yield, Return>(
@@ -343,7 +386,7 @@ export class Eff {
 
         const result = yield {
             type: 'async',
-            value,
+            promise: value,
         }
 
         return result as T

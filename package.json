@@ -1,6 +1,6 @@
 {
     "name": "koka",
-    "version": "1.0.4",
+    "version": "1.0.6",
     "description": "Lightweight 3kB Effect-TS alternative library based on Algebraic Effects",
     "keywords": [],
     "repository": "github:koka-ts/koka",

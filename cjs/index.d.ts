@@ -1,1 +1,1 @@
-export * from './koka';
+export * from './koka'
