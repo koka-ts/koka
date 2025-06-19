@@ -116,10 +116,10 @@ const total = Eff.run(main(0.1)) // Returns 90
 ```typescript
 function* getUserPreferences() {
     // Get optional value without default (returns T | undefined)
-    const theme = yield* Eff.opt('Theme').get<string>()
+    const theme = yield* Eff.ctx('Theme').opt<string>()
 
     // Get optional value with default (returns T)
-    const fontSize = yield* Eff.opt('FontSize').get(14)
+    const fontSize = (yield* Eff.ctx('FontSize').opt<number>()) ?? 14
 
     return { theme, fontSize }
 }
