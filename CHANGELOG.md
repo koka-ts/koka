@@ -1,5 +1,11 @@
 # koka
 
+## 1.0.7
+
+### Patch Changes
+
+-   feat: supports stream/all/race/communicate
+
 ## 1.0.6
 
 ### Patch Changes

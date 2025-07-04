@@ -19,24 +19,34 @@ exports.Result = {
     },
 }
 function Ctx(name) {
-    return /** @class */ (function () {
-        function Eff() {
-            this.type = 'ctx'
-            this.name = name
-            this.context = exports.EffSymbol
-        }
-        return Eff
-    })()
+    var _a
+    return (
+        (_a = /** @class */ (function () {
+            function Eff() {
+                this.type = 'ctx'
+                this.name = name
+                this.context = exports.EffSymbol
+            }
+            return Eff
+        })()),
+        (_a.field = name),
+        _a
+    )
 }
 function Err(name) {
-    return /** @class */ (function () {
-        function Eff(error) {
-            this.type = 'err'
-            this.name = name
-            this.error = error
-        }
-        return Eff
-    })()
+    var _a
+    return (
+        (_a = /** @class */ (function () {
+            function Eff(error) {
+                this.type = 'err'
+                this.name = name
+                this.error = error
+            }
+            return Eff
+        })()),
+        (_a.field = name),
+        _a
+    )
 }
 function Opt(name) {
     return /** @class */ (function (_super) {
@@ -44,6 +54,7 @@ function Opt(name) {
         function Eff() {
             var _this = _super.apply(this, tslib_1.__spreadArray([], tslib_1.__read(arguments), false)) || this
             _this.optional = true
+            _this.context = exports.EffSymbol
             return _this
         }
         return Eff

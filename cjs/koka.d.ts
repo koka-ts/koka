@@ -78,6 +78,7 @@ declare function Ctx<const Name extends string>(
         context: EffSymbol | T
         optional?: true
     }
+    field: Name
 }
 declare function Err<const Name extends string>(
     name: Name,
@@ -87,16 +88,18 @@ declare function Err<const Name extends string>(
         name: Name
         error: E
     }
+    field: Name
 }
 declare function Opt<const Name extends string>(
     name: Name,
 ): {
     new <T>(): {
         optional: true
+        context: EffSymbol | T
         type: 'ctx'
         name: Name
-        context: EffSymbol | T_1
     }
+    field: Name
 }
 export type CtxValue<C extends AnyCtx> = C['optional'] extends true
     ? Exclude<C['context'], EffSymbol> | undefined
