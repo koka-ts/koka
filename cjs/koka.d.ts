@@ -12,7 +12,7 @@ export type Ctx<Name extends string, T> = {
     context: EffSymbol | T
     optional?: true
 }
-export type Opt<Name extends string, T> = Ctx<Name, T> & {
+export interface Opt<Name extends string, T> extends Ctx<Name, T> {
     optional: true
 }
 export type AnyCtx = Ctx<string, any>
@@ -22,7 +22,19 @@ export type Async = {
     promise: Promise<unknown>
 }
 export type AnyOpt = Opt<string, any>
-export type EffType<T> = Err<string, T> | Ctx<string, T> | Opt<string, T> | Async
+export type Msg<Name extends string, T> = {
+    type: 'msg'
+    name: Name
+    message?: T
+}
+export type AnyMsg = Msg<string, any>
+export interface SendMsg<Name extends string, T> extends Msg<Name, T> {
+    message: T
+}
+export interface WaitMsg<Name extends string, T> extends Msg<Name, T> {
+    message?: undefined
+}
+export type EffType<T> = Err<string, T> | Ctx<string, T> | Opt<string, T> | Async | Msg<string, T>
 export type AnyEff = EffType<any>
 type UnionToIntersection<U> = (U extends any ? (k: U) => void : never) extends (k: infer I) => void ? I : never
 type ToHandler<Effect> = Effect extends Err<infer Name, infer U>
@@ -51,21 +63,39 @@ export declare const Result: {
     ok: <T>(value: T) => Ok<T>
     err: <Name extends string, T>(name: Name, error: T) => Err<Name, T>
 }
-type InferOkValue<T> = T extends Ok<infer U> ? U : never
-type MaybeGenerator<T, R> = Generator<T, R> | (() => Generator<T, R>)
-type ExtractEff<Effects> = Effects extends []
+export type InferOkValue<T> = T extends Ok<infer U> ? U : never
+export type Task<Yield extends AnyEff, Return> = Generator<Yield, Return> | (() => Generator<Yield, Return>)
+type ExtractYieldFromObject<Gens extends object> = {
+    [K in keyof Gens]: Gens[K] extends Task<infer E, any> ? E : never
+}[keyof Gens]
+type ExtractYieldFromTuple<Gens> = Gens extends []
     ? never
-    : Effects extends [infer First, ...infer Rest]
-    ? First extends MaybeFunction<Generator<infer E, any>>
-        ? E | ExtractEff<Rest>
+    : Gens extends [infer Head, ...infer Tail]
+    ? Head extends Task<infer Yield, any>
+        ? Yield | ExtractYieldFromTuple<Tail>
         : never
     : never
-type ExtractReturn<Effects> = Effects extends []
+type ExtractYield<Gens> = Gens extends unknown[]
+    ? ExtractYieldFromTuple<Gens>
+    : Gens extends object
+    ? ExtractYieldFromObject<Gens>
+    : never
+type ExtractReturnFromTuple<Gens> = Gens extends []
     ? []
-    : Effects extends [infer First, ...infer Rest]
-    ? First extends MaybeFunction<Generator<any, infer R>>
-        ? [R, ...ExtractReturn<Rest>]
-        : never
+    : Gens extends [infer Head, ...infer Tail]
+    ? Head extends Task<any, infer R>
+        ? [R, ...ExtractReturnFromTuple<Tail>]
+        : [Head, ...ExtractReturnFromTuple<Tail>]
+    : never
+type ExtractReturnFromObject<Gens extends object> = {
+    [K in keyof Gens]: Gens[K] extends Task<any, infer R> ? R : Gens[K]
+}
+type ExtractReturn<Gens> = Gens extends unknown[]
+    ? ExtractReturnFromTuple<Gens>
+    : Gens extends object
+    ? {
+          [key in keyof ExtractReturnFromObject<Gens>]: ExtractReturnFromObject<Gens>[key]
+      }
     : never
 export type MaybePromise<T> = T extends Promise<any> ? T : T | Promise<T>
 export type MaybeFunction<T> = T | (() => T)
@@ -101,9 +131,38 @@ declare function Opt<const Name extends string>(
     }
     field: Name
 }
+declare abstract class AbstractMsg<T> {
+    static field: string
+    type: 'msg'
+    abstract name: string
+    message: T
+    constructor(message: T)
+}
+declare function Msg<const Name extends string>(
+    name: Name,
+): {
+    new <T>(message: T): {
+        name: Name
+        type: 'msg'
+        message: T
+    }
+    field: Name
+}
+interface Wait<T extends AbstractMsg<any>> {
+    type: 'msg'
+    name: T['name']
+    message?: undefined
+}
 export type CtxValue<C extends AnyCtx> = C['optional'] extends true
     ? Exclude<C['context'], EffSymbol> | undefined
     : Exclude<C['context'], EffSymbol>
+export type MsgValue<M extends AnyMsg> = M extends Msg<string, infer T> ? T : never
+export type StreamResult<T> = {
+    index: number
+    value: T
+}
+export type StreamResults<TaskReturn> = AsyncGenerator<StreamResult<TaskReturn>, void, void>
+export type StreamHandler<TaskReturn, HandlerReturn> = (results: StreamResults<TaskReturn>) => Promise<HandlerReturn>
 export declare class Eff {
     static err: <const Name extends string>(
         name: Name,
@@ -121,15 +180,44 @@ export declare class Eff {
     static Ctx: typeof Ctx
     static Opt: typeof Opt
     static get<C extends AnyCtx>(ctx: C | (new () => C)): Generator<C, CtxValue<C>>
-    static all<const Effects extends MaybeGenerator<AnyEff, unknown>[]>(
-        effects: Effects,
-    ): Generator<ExtractEff<Effects>, ExtractReturn<Effects>>
-    static try: <Yield extends AnyEff, Return>(
-        input: MaybeFunction<Generator<Yield, Return>>,
+    static msg: <const Name extends string>(
+        name: Name,
     ) => {
-        catch<Handlers extends Partial<EffectHandlers<Yield>>>(
+        send<T>(message: T): Generator<SendMsg<Name, T>, void>
+        wait<T>(): Generator<WaitMsg<Name, T>, T>
+    }
+    static Msg: typeof Msg
+    static send<T extends SendMsg<string, unknown>>(message: T): Generator<T, void>
+    static wait<MsgCtor extends typeof AbstractMsg<unknown>>(
+        msg: MsgCtor,
+    ): Generator<Wait<InstanceType<MsgCtor>>, InstanceType<MsgCtor>['message']>
+    static communicate<const T extends {}>(
+        inputs: T,
+    ): Generator<
+        Exclude<
+            ExtractYield<T>,
+            {
+                type: 'msg'
+            }
+        >,
+        ExtractReturn<T>
+    >
+    static of<T>(value: T): Generator<never, T, unknown>
+    static stream<Yield extends AnyEff, TaskReturn, HandlerReturn>(
+        inputs: Iterable<Task<Yield, TaskReturn>>,
+        handler: StreamHandler<TaskReturn, HandlerReturn>,
+    ): Generator<Async | Yield, HandlerReturn>
+    static combine<const T extends unknown[] | readonly unknown[] | {}>(
+        inputs: T,
+    ): Generator<ExtractYield<T> | Async, ExtractReturn<T>>
+    static all<Yield extends AnyEff, Return>(inputs: Iterable<Task<Yield, Return>>): Generator<Yield | Async, Return[]>
+    static race<Yield extends AnyEff, Return>(inputs: Iterable<Task<Yield, Return>>): Generator<Yield | Async, Return>
+    static try: <Yield extends AnyEff, Return>(
+        input: Task<Yield, Return>,
+    ) => {
+        handle<Handlers extends Partial<EffectHandlers<Yield>>>(
             handlers: Handlers,
-        ): Generator<
+        ): Task<
             Exclude<
                 Yield,
                 {

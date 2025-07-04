@@ -213,7 +213,7 @@ const cleanUpGen = <Yield, Return, Next>(gen: Generator<Yield, Return, Next>) =>
 }
 
 const withResolvers: <T>() => PromiseWithResolvers<T> =
-    Promise.withResolvers ??
+    Promise.withResolvers?.bind(Promise) ??
     (<T>() => {
         let resolve: (value: T) => void
         let reject: (reason?: any) => void
