@@ -32,66 +32,71 @@
 
 ### 核心方法
 
-#### `Eff.err(name).throw(error?)`
+#### `Eff.throw(error)`
 
 抛出错误效果。
 
 **参数：**
 
--   `name` (string): 错误类型的名称
--   `error` (any, 可选): 错误信息
+-   `error` (Err): 错误效果实例
 
-**返回：** `Generator<Err<Name, E>, never>`
+**返回：** `Generator<E, never>`
 
 **示例：**
 
 ```typescript
+class ValidationError extends Eff.Err('ValidationError')<string> {}
+
 function* validateUser(userId: string) {
     if (!userId) {
-        yield* Eff.err('ValidationError').throw('User ID is required')
+        yield* Eff.throw(new ValidationError('User ID is required'))
     }
     return { id: userId, name: 'John Doe' }
 }
 ```
 
-#### `Eff.ctx(name).get<T>()`
+#### `Eff.get(ctx)`
 
 获取上下文值。
 
 **参数：**
 
--   `name` (string): 上下文名称
--   `T` (类型参数): 上下文值的类型
+-   `ctx` (Ctx | (new () => C)): 上下文类或实例
 
-**返回：** `Generator<Ctx<Name, T>, T>`
+**返回：** `Generator<C, CtxValue<C>>`
 
 **示例：**
 
 ```typescript
+class UserId extends Eff.Ctx('UserId')<string> {}
+class ApiKey extends Eff.Ctx('ApiKey')<string> {}
+
 function* getUserInfo() {
-    const userId = yield* Eff.ctx('UserId').get<string>()
-    const apiKey = yield* Eff.ctx('ApiKey').get<string>()
+    const userId = yield* Eff.get(UserId)
+    const apiKey = yield* Eff.get(ApiKey)
     return { userId, apiKey }
 }
 ```
 
-#### `Eff.ctx(name).opt<T>()`
+#### `Eff.get(opt)` (可选上下文)
 
 获取可选的上下文值。
 
 **参数：**
 
--   `name` (string): 上下文名称
--   `T` (类型参数): 上下文值的类型
+-   `opt` (Opt | (new () => O)): 可选上下文类或实例
 
-**返回：** `Generator<Opt<Name, T>, T | undefined>`
+**返回：** `Generator<O, CtxValue<O>>`
 
 **示例：**
 
 ```typescript
+class Theme extends Eff.Opt('Theme')<string> {}
+class FontSize extends Eff.Opt('FontSize')<number> {}
+
 function* getUserPreferences() {
-    const theme = yield* Eff.ctx('Theme').opt<string>()
-    const fontSize = yield* Eff.ctx('FontSize').opt<number>()
+    const theme = yield* Eff.get(Theme)
+    const fontSize = yield* Eff.get(FontSize)
     return { theme: theme ?? 'light', fontSize: fontSize ?? 14 }
 }
 ```
@@ -301,38 +306,38 @@ const result = Eff.runSync(
 )
 ```
 
-#### `Eff.msg(name).send(message)`
+#### `Eff.send(message)`
 
 发送消息。
 
 **参数：**
 
--   `name` (string): 消息名称
--   `message` (T): 消息内容
+-   `message` (SendMsg): 消息实例
 
-**返回：** `Generator<SendMsg<Name, T>, void>`
+**返回：** `Generator<T, void>`
 
 **示例：**
 
 ```typescript
-yield * Eff.msg('Greeting').send('Hello, World!')
+class Greeting extends Eff.Msg('Greeting')<string> {}
+yield * Eff.send(new Greeting('Hello, World!'))
 ```
 
-#### `Eff.msg(name).wait<T>()`
+#### `Eff.wait(msgClass)`
 
 等待消息。
 
 **参数：**
 
--   `name` (string): 消息名称
--   `T` (类型参数): 消息类型
+-   `msgClass` (typeof AbstractMsg): 消息类
 
-**返回：** `Generator<WaitMsg<Name, T>, T>`
+**返回：** `Generator<Wait<InstanceType<MsgCtor>>, InstanceType<MsgCtor>['message']>`
 
 **示例：**
 
 ```typescript
-const message = yield * Eff.msg('Greeting').wait<string>()
+class Greeting extends Eff.Msg('Greeting')<string> {}
+const message = yield * Eff.wait(Greeting)
 ```
 
 ### 结果处理方法

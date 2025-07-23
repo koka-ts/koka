@@ -74,7 +74,7 @@ try {
 ```typescript
 function* getUser(id: string) {
     if (!id) {
-        yield* Eff.err('ValidationError').throw('ID is required') // Throw error, interrupt execution
+        yield* Eff.throw(new ValidationError('ID is required')) // Throw error, interrupt execution
     }
     return yield* Eff.await(fetchUser(id))
 }
@@ -190,7 +190,7 @@ Effects naturally propagate through function call chains:
 
 ```typescript
 function* inner() {
-    yield* Eff.err('InnerError').throw('inner error')
+    yield* Eff.throw(new InnerError('inner error'))
     return 'should not reach here'
 }
 
@@ -337,7 +337,7 @@ Koka provides powerful type inference:
 // Automatically infer effect type
 function* getUser(userId: string) {
     if (!userId) {
-        yield* Eff.err('ValidationError').throw('ID required')
+        yield* Eff.throw(new ValidationError('ID required'))
         // TypeScript knows this will produce ValidationError effect
     }
 
@@ -411,9 +411,11 @@ const result = await Effect.runPromise(
 ```typescript
 import { Eff } from 'koka'
 
+class ValidationError extends Eff.Err('ValidationError')<string> {}
+
 function* getUser(id: string) {
     if (!id) {
-        yield* Eff.err('ValidationError').throw('ID required')
+        yield* Eff.throw(new ValidationError('ID required'))
     }
     return yield* Eff.await(fetch(`/users/${id}`))
 }
@@ -452,8 +454,10 @@ const result = await Effect.runPromise(runnable)
 ```typescript
 import { Eff } from 'koka'
 
+class MyRandom extends Eff.Ctx('MyRandom')<() => number> {}
+
 function* program() {
-    const getRandom = yield* Eff.ctx('MyRandom').get<() => number>()
+    const getRandom = yield* Eff.get(MyRandom)
     return getRandom()
 }
 

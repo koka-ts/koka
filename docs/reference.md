@@ -32,66 +32,71 @@ This document provides the complete API reference for the Koka library.
 
 ### Core Methods
 
-#### `Eff.err(name).throw(error?)`
+#### `Eff.throw(error)`
 
 Throw an error effect.
 
 **Parameters:**
 
--   `name` (string): Name of the error type
--   `error` (any, optional): Error information
+-   `error` (Err): Error effect instance
 
-**Returns:** `Generator<Err<Name, E>, never>`
+**Returns:** `Generator<E, never>`
 
 **Example:**
 
 ```typescript
+class ValidationError extends Eff.Err('ValidationError')<string> {}
+
 function* validateUser(userId: string) {
     if (!userId) {
-        yield* Eff.err('ValidationError').throw('User ID is required')
+        yield* Eff.throw(new ValidationError('User ID is required'))
     }
     return { id: userId, name: 'John Doe' }
 }
 ```
 
-#### `Eff.ctx(name).get<T>()`
+#### `Eff.get(ctx)`
 
 Get a context value.
 
 **Parameters:**
 
--   `name` (string): Context name
--   `T` (type parameter): Type of the context value
+-   `ctx` (Ctx | (new () => C)): Context class or instance
 
-**Returns:** `Generator<Ctx<Name, T>, T>`
+**Returns:** `Generator<C, CtxValue<C>>`
 
 **Example:**
 
 ```typescript
+class UserId extends Eff.Ctx('UserId')<string> {}
+class ApiKey extends Eff.Ctx('ApiKey')<string> {}
+
 function* getUserInfo() {
-    const userId = yield* Eff.ctx('UserId').get<string>()
-    const apiKey = yield* Eff.ctx('ApiKey').get<string>()
+    const userId = yield* Eff.get(UserId)
+    const apiKey = yield* Eff.get(ApiKey)
     return { userId, apiKey }
 }
 ```
 
-#### `Eff.ctx(name).opt<T>()`
+#### `Eff.get(opt)` (Optional Context)
 
 Get an optional context value.
 
 **Parameters:**
 
--   `name` (string): Context name
--   `T` (type parameter): Type of the context value
+-   `opt` (Opt | (new () => O)): Optional context class or instance
 
-**Returns:** `Generator<Opt<Name, T>, T | undefined>`
+**Returns:** `Generator<O, CtxValue<O>>`
 
 **Example:**
 
 ```typescript
+class Theme extends Eff.Opt('Theme')<string> {}
+class FontSize extends Eff.Opt('FontSize')<number> {}
+
 function* getUserPreferences() {
-    const theme = yield* Eff.ctx('Theme').opt<string>()
-    const fontSize = yield* Eff.ctx('FontSize').opt<number>()
+    const theme = yield* Eff.get(Theme)
+    const fontSize = yield* Eff.get(FontSize)
     return { theme: theme ?? 'light', fontSize: fontSize ?? 14 }
 }
 ```
@@ -300,38 +305,38 @@ const result = Eff.runSync(
 )
 ```
 
-#### `Eff.msg(name).send(message)`
+#### `Eff.send(message)`
 
 Send a message.
 
 **Parameters:**
 
--   `name` (string): Message name
--   `message` (T): Message content
+-   `message` (SendMsg): Message instance
 
-**Returns:** `Generator<SendMsg<Name, T>, void>`
+**Returns:** `Generator<T, void>`
 
 **Example:**
 
 ```typescript
-yield * Eff.msg('Greeting').send('Hello, World!')
+class Greeting extends Eff.Msg('Greeting')<string> {}
+yield * Eff.send(new Greeting('Hello, World!'))
 ```
 
-#### `Eff.msg(name).wait<T>()`
+#### `Eff.wait(msgClass)`
 
 Wait for a message.
 
 **Parameters:**
 
--   `name` (string): Message name
--   `T` (type parameter): Message type
+-   `msgClass` (typeof AbstractMsg): Message class
 
-**Returns:** `Generator<WaitMsg<Name, T>, T>`
+**Returns:** `Generator<Wait<InstanceType<MsgCtor>>, InstanceType<MsgCtor>['message']>`
 
 **Example:**
 
 ```typescript
-const message = yield * Eff.msg('Greeting').wait<string>()
+class Greeting extends Eff.Msg('Greeting')<string> {}
+const message = yield * Eff.wait(Greeting)
 ```
 
 ### Result Processing Methods

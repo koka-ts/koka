@@ -1,10 +1,23 @@
-import { AnyEff, Eff } from '../src/koka'
+import * as Eff from '../src'
+
+class ValidationError extends Eff.Err('ValidationError')<string> {}
+class InnerError extends Eff.Err('InnerError')<string> {}
+class UserId extends Eff.Ctx('UserId')<string> {}
+class ApiKey extends Eff.Ctx('ApiKey')<string> {}
+class Theme extends Eff.Opt('Theme')<string> {}
+class FontSize extends Eff.Opt('FontSize')<number> {}
+class MyRandom extends Eff.Ctx('MyRandom')<() => number> {}
+class SomeContext extends Eff.Ctx('SomeContext')<number> {}
+class GreetingMsg extends Eff.Msg('Greeting')<string> {}
+class LogMsg extends Eff.Msg('Log')<string> {}
 
 describe('Koka Documentation Examples - Tutorial Section', () => {
     it('Your First Koka Program', () => {
+        class ValidationError extends Eff.Err('ValidationError')<string> {}
+
         function* greet(name: string) {
             if (!name) {
-                yield* Eff.err('ValidationError').throw('Name is required')
+                yield* Eff.throw(new ValidationError('Name is required'))
             }
             return `Hello, ${name}!`
         }
@@ -23,9 +36,11 @@ describe('Koka Documentation Examples - Tutorial Section', () => {
     })
 
     it('Error Handling Basics', () => {
+        class DivisionByZero extends Eff.Err('DivisionByZero')<string> {}
+
         function* divide(a: number, b: number) {
             if (b === 0) {
-                yield* Eff.err('DivisionByZero').throw('Cannot divide by zero')
+                yield* Eff.throw(new DivisionByZero('Cannot divide by zero'))
             }
             return a / b
         }
@@ -40,9 +55,11 @@ describe('Koka Documentation Examples - Tutorial Section', () => {
     })
 
     it('Error Propagation', () => {
+        class DivisionByZero extends Eff.Err('DivisionByZero')<string> {}
+
         function* divide(a: number, b: number) {
             if (b === 0) {
-                yield* Eff.err('DivisionByZero').throw('Cannot divide by zero')
+                yield* Eff.throw(new DivisionByZero('Cannot divide by zero'))
             }
             return a / b
         }
@@ -63,9 +80,12 @@ describe('Koka Documentation Examples - Tutorial Section', () => {
     })
 
     it('Context Management', () => {
+        class UserId extends Eff.Ctx('UserId')<string> {}
+        class ApiKey extends Eff.Ctx('ApiKey')<string> {}
+
         function* getUserInfo() {
-            const userId = yield* Eff.ctx('UserId').get<string>()
-            const apiKey = yield* Eff.ctx('ApiKey').get<string>()
+            const userId = yield* Eff.get(UserId)
+            const apiKey = yield* Eff.get(ApiKey)
             return `User ${userId} with API key ${apiKey.slice(0, 5)}...`
         }
         const result = Eff.run(
@@ -78,9 +98,12 @@ describe('Koka Documentation Examples - Tutorial Section', () => {
     })
 
     it('Optional Context', () => {
+        class Theme extends Eff.Opt('Theme')<string> {}
+        class FontSize extends Eff.Opt('FontSize')<number> {}
+
         function* getUserPreferences() {
-            const theme = yield* Eff.ctx('Theme').opt<string>()
-            const fontSize = yield* Eff.ctx('FontSize').opt<number>()
+            const theme = yield* Eff.get(Theme)
+            const fontSize = yield* Eff.get(FontSize)
             return {
                 theme: theme ?? 'light',
                 fontSize: fontSize ?? 14,
@@ -380,14 +403,14 @@ describe('Koka Documentation Examples - How-to Guides Section', () => {
         function* userClient() {
             yield* Eff.send(new UserRequest({ userId: '123' }))
             const response = yield* Eff.wait(UserResponse)
-            yield* Eff.msg('Log').send(`Received user: ${response.user.name}`)
+            yield* Eff.send(new LogMsg(`Received user: ${response.user.name}`))
             return `Client: ${response.user.name}`
         }
 
         // Server generator
         function* userServer() {
             const request = yield* Eff.wait(UserRequest)
-            yield* Eff.msg('Log').send(`Processing request for user: ${request.userId}`)
+            yield* Eff.send(new LogMsg(`Processing request for user: ${request.userId}`))
 
             const user = { id: request.userId, name: 'John Doe' }
             yield* Eff.send(new UserResponse({ user }))
@@ -397,8 +420,8 @@ describe('Koka Documentation Examples - How-to Guides Section', () => {
 
         // Logger generator
         function* logger() {
-            const log1 = yield* Eff.msg('Log').wait<string>()
-            const log2 = yield* Eff.msg('Log').wait<string>()
+            const log1 = yield* Eff.wait(LogMsg)
+            const log2 = yield* Eff.wait(LogMsg)
             return `Logger: ${log1}, ${log2}`
         }
 
@@ -457,7 +480,7 @@ describe('Koka Documentation Examples - How-to Guides Section', () => {
 
     it('Error Recovery and Retry Mechanism', async () => {
         // Retry function
-        function* withRetry<E extends AnyEff, T>(
+        function* withRetry<E extends Eff.AnyEff, T>(
             effect: () => Generator<E, T>,
             maxRetries: number = 3,
             delay: number = 1000,
@@ -663,10 +686,10 @@ describe('Koka Documentation Examples - How-to Guides Section', () => {
 })
 
 describe('Koka Documentation Examples - Reference Section', () => {
-    it('Eff.err().throw() Example', () => {
+    it('Eff.throw() Example', () => {
         function* validateUser(userId: string) {
             if (!userId) {
-                yield* Eff.err('ValidationError').throw('User ID is required')
+                yield* Eff.throw(new ValidationError('User ID is required'))
             }
             return { id: userId, name: 'John Doe' }
         }
@@ -680,10 +703,10 @@ describe('Koka Documentation Examples - Reference Section', () => {
         expect(result).toEqual({ id: '123', name: 'John Doe' })
     })
 
-    it('Eff.ctx().get() Example', () => {
+    it('Eff.get() Example', () => {
         function* getUserInfo() {
-            const userId = yield* Eff.ctx('UserId').get<string>()
-            const apiKey = yield* Eff.ctx('ApiKey').get<string>()
+            const userId = yield* Eff.get(UserId)
+            const apiKey = yield* Eff.get(ApiKey)
             return { userId, apiKey }
         }
 
@@ -697,10 +720,10 @@ describe('Koka Documentation Examples - Reference Section', () => {
         expect(result).toEqual({ userId: '12345', apiKey: 'secret-key' })
     })
 
-    it('Eff.ctx().opt() Example', () => {
+    it('Eff.get() Opt Example', () => {
         function* getUserPreferences() {
-            const theme = yield* Eff.ctx('Theme').opt<string>()
-            const fontSize = yield* Eff.ctx('FontSize').opt<number>()
+            const theme = yield* Eff.get(Theme)
+            const fontSize = yield* Eff.get(FontSize)
             return { theme: theme ?? 'light', fontSize: fontSize ?? 14 }
         }
 
@@ -721,7 +744,7 @@ describe('Koka Documentation Examples - Reference Section', () => {
     it('Eff.try().handle() Example', () => {
         function* getUser(id: string) {
             if (!id) {
-                yield* Eff.err('ValidationError').throw('ID required')
+                yield* Eff.throw(new ValidationError('ID required'))
             }
             return { id, name: 'John Doe' }
         }
@@ -738,7 +761,7 @@ describe('Koka Documentation Examples - Reference Section', () => {
 
     it('Eff.run() Example', () => {
         function* getUserPreferences() {
-            const theme = yield* Eff.ctx('Theme').opt<string>()
+            const theme = yield* Eff.get(Theme)
             return { theme: theme ?? 'light' }
         }
 
@@ -748,7 +771,7 @@ describe('Koka Documentation Examples - Reference Section', () => {
 
     it('Eff.runSync() Example', () => {
         function* getUserPreferences() {
-            const theme = yield* Eff.ctx('Theme').opt<string>()
+            const theme = yield* Eff.get(Theme)
             return { theme: theme ?? 'light' }
         }
 
@@ -882,12 +905,12 @@ describe('Koka Documentation Examples - Reference Section', () => {
 
     it('Eff.communicate() Example', () => {
         function* senderGenerator() {
-            yield* Eff.msg('Greeting').send('Hello, World!')
+            yield* Eff.send(new GreetingMsg('Hello, World!'))
             return 'Sender completed'
         }
 
         function* receiverGenerator() {
-            const message = yield* Eff.msg('Greeting').wait<string>()
+            const message = yield* Eff.wait(GreetingMsg)
             return `Receiver got: ${message}`
         }
 
@@ -904,13 +927,13 @@ describe('Koka Documentation Examples - Reference Section', () => {
         })
     })
 
-    it('Eff.msg().send() and Eff.msg().wait() Example', () => {
+    it('Eff.send() and Eff.wait() Example', () => {
         function* sender() {
-            yield* Eff.msg('Greeting').send('Hello, World!')
+            yield* Eff.send(new GreetingMsg('Hello, World!'))
         }
 
         function* receiver() {
-            const message = yield* Eff.msg('Greeting').wait<string>()
+            const message = yield* Eff.wait(GreetingMsg)
             return message
         }
 
@@ -927,7 +950,7 @@ describe('Koka Documentation Examples - Reference Section', () => {
     it('Eff.result() Example', () => {
         function* getUser(userId: string) {
             if (!userId) {
-                yield* Eff.err('ValidationError').throw('User ID is required')
+                yield* Eff.throw(new ValidationError('User ID is required'))
             }
             return { id: userId, name: 'John Doe' }
         }
@@ -951,7 +974,7 @@ describe('Koka Documentation Examples - Reference Section', () => {
     it('Eff.ok() Example', () => {
         function* getUser(userId: string) {
             if (!userId) {
-                yield* Eff.err('ValidationError').throw('User ID is required')
+                yield* Eff.throw(new ValidationError('User ID is required'))
             }
             return { id: userId, name: 'John Doe' }
         }
@@ -979,7 +1002,7 @@ describe('Koka Documentation Examples - Reference Section', () => {
     it('Eff.runResult() Example', () => {
         function* getUser(userId: string) {
             if (!userId) {
-                yield* Eff.err('ValidationError').throw('User ID is required')
+                yield* Eff.throw(new ValidationError('User ID is required'))
             }
             return { id: userId, name: 'John Doe' }
         }
@@ -1000,9 +1023,7 @@ describe('Koka Documentation Examples - Reference Section', () => {
 
     it('Predefined Effect Classes Example', () => {
         class UserNotFound extends Eff.Err('UserNotFound')<string> {}
-        class ValidationError extends Eff.Err('ValidationError')<{ field: string; message: string }> {}
         class DatabaseConnection extends Eff.Ctx('Database')<{ query: (sql: string) => any }> {}
-        class Logger extends Eff.Opt('Logger')<(level: string, message: string) => void> {}
         class UserRequest extends Eff.Msg('UserRequest')<{ userId: string }> {}
 
         const error = new UserNotFound('User not found')
@@ -1080,7 +1101,7 @@ describe('Koka Documentation Examples - Explanations Section', () => {
         // Algebraic effect handling
         function* getUserEffect(id: string) {
             if (!id) {
-                yield* Eff.err('ValidationError').throw('ID is required')
+                yield* Eff.throw(new ValidationError('ID is required'))
             }
             return { id, name: 'John Doe' }
         }
@@ -1096,7 +1117,7 @@ describe('Koka Documentation Examples - Explanations Section', () => {
 
     it('Effect Propagation Example', () => {
         function* inner() {
-            yield* Eff.err('InnerError').throw('inner error')
+            yield* Eff.throw(new InnerError('inner error'))
             return 'should not reach here'
         }
 
@@ -1116,7 +1137,7 @@ describe('Koka Documentation Examples - Explanations Section', () => {
     it('Effect Handling Example', () => {
         function* getUser(userId: string) {
             if (!userId) {
-                yield* Eff.err('ValidationError').throw('User ID is required')
+                yield* Eff.throw(new ValidationError('User ID is required'))
             }
             return { id: userId, name: 'John Doe' }
         }
@@ -1131,13 +1152,15 @@ describe('Koka Documentation Examples - Explanations Section', () => {
     })
 
     it('Generator Effect Pattern Example', () => {
+        class SomeError extends Eff.Err('SomeError')<string> {}
+
         function* effectFunction() {
             // 1. Yield effects
-            const value = yield* Eff.ctx('SomeContext').get<number>()
+            const value = yield* Eff.get(SomeContext)
 
             // 2. Handle effect results
             if (value === null) {
-                yield* Eff.err('SomeError').throw('Context value is null')
+                yield* Eff.throw(new SomeError('Context value is null'))
             }
 
             // 3. Return final result
@@ -1157,7 +1180,7 @@ describe('Koka Documentation Examples - Explanations Section', () => {
     it('Type Inference Example', async () => {
         function* getUser(userId: string) {
             if (!userId) {
-                yield* Eff.err('ValidationError').throw('ID required')
+                yield* Eff.throw(new ValidationError('ID required'))
             }
 
             const user = yield* Eff.await(Promise.resolve({ id: userId, name: 'John Doe' }))
@@ -1177,7 +1200,7 @@ describe('Koka Documentation Examples - Explanations Section', () => {
         // Koka approach
         function* getUserKoka(id: string) {
             if (!id) {
-                yield* Eff.err('ValidationError').throw('ID required')
+                yield* Eff.throw(new ValidationError('ID required'))
             }
             return yield* Eff.await(Promise.resolve({ id, name: 'John Doe' }))
         }
@@ -1198,7 +1221,7 @@ describe('Koka Documentation Examples - Explanations Section', () => {
     it('Context Management Comparison Example', () => {
         // Koka approach
         function* program() {
-            const getRandom = yield* Eff.ctx('MyRandom').get<() => number>()
+            const getRandom = yield* Eff.get(MyRandom)
             return getRandom()
         }
 

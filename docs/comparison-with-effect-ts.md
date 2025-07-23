@@ -99,7 +99,7 @@ import { Eff } from 'koka'
 
 function* getUser(id: string) {
     if (!id) {
-        yield* Eff.err('ValidationError').throw('ID required')
+        yield* Eff.throw(new ValidationError('ID required'))
     }
 
     const user = yield* Eff.await(fetch(`/users/${id}`))
@@ -167,8 +167,10 @@ random number: 0.8241872233134417
 ```typescript
 import { Eff } from 'koka'
 
+class MyRandom extends Eff.Ctx('MyRandom')<number> {}
+
 const program = function* () {
-    const getRandom = yield* Eff.ctx('MyRandom').get<() => number>()
+    const getRandom = yield* Eff.get(MyRandom)
     const randomNumber = getRandom()
 
     console.log(`random number: ${randomNumber}`)
@@ -188,7 +190,7 @@ Key context management differences:
     -   Uses complex context system with `Context.Tag`
     -   Provides type-safe dependency injection
 -   **Koka**:
-    -   Uses simple string-based context retrieval via `Eff.ctx`
+    -   Uses simple string-based context retrieval via `Eff.Ctx`
     -   Provides more direct setup
 
 ## Async Operations

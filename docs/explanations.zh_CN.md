@@ -72,9 +72,11 @@ try {
 **代数效应处理：**
 
 ```typescript
+class ValidationError extends Eff.Err('ValidationError')<string> {}
+
 function* getUser(id: string) {
     if (!id) {
-        yield* Eff.err('ValidationError').throw('ID is required') // 抛出错误，中断执行
+        yield* Eff.throw(new ValidationError('ID is required')) // 抛出错误，中断执行
     }
     return yield* Eff.await(fetchUser(id))
 }
@@ -189,8 +191,10 @@ type Effect<T, E, C> = Generator<
 效果在函数调用链中自然传播：
 
 ```typescript
+class InnerError extends Eff.Err('InnerError')<string> {}
+
 function* inner() {
-    yield* Eff.err('InnerError').throw('inner error')
+    yield* Eff.throw(new InnerError('inner error'))
     return 'should not reach here'
 }
 
@@ -340,7 +344,7 @@ Koka 提供强大的类型推断：
 // 自动推断效果类型
 function* getUser(userId: string) {
     if (!userId) {
-        yield* Eff.err('ValidationError').throw('ID required')
+        yield* Eff.throw(new ValidationError('ID required'))
         // TypeScript 知道这里会产生 ValidationError 效果
     }
 
@@ -408,7 +412,7 @@ import { Eff } from 'koka'
 
 function* program() {
     const str = 'hello'
-    yield* Eff.err('Error').throw(str)
+    yield* Eff.throw(new Error(str))
 }
 
 const result = Eff.run(

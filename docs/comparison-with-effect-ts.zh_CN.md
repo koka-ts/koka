@@ -99,7 +99,7 @@ import { Eff } from 'koka'
 
 function* getUser(id: string) {
     if (!id) {
-        yield* Eff.err('ValidationError').throw('ID required')
+        yield* Eff.throw(new ValidationError('ID required'))
     }
 
     const user = yield* Eff.await(fetch(`/users/${id}`))
@@ -168,7 +168,7 @@ random number: 0.8241872233134417
 import { Eff } from 'koka'
 
 const program = function* () {
-    const getRandom = yield* Eff.ctx('MyRandom').get<() => number>()
+    const getRandom = yield* Eff.get(MyRandom)
     const randomNumber = getRandom()
 
     console.log(`random number: ${randomNumber}`)
@@ -188,7 +188,7 @@ Eff.run(
     -   使用复杂的上下文系统与 `Context.Tag`
     -   提供类型安全的依赖注入
 -   **Koka**：
-    -   使用简单的基于字符串的上下文检索 via `Eff.ctx`
+    -   使用简单的基于字符串的上下文检索 via `Eff.Ctx`
     -   提供更直接的设置
 
 ## 异步操作
@@ -389,7 +389,7 @@ const getUser = (userId: string) =>
 ### 从 Effect-TS 到 Koka
 
 1. 将 `Effect.gen` 替换为原生生成器
-2. 将 `Effect.fail` 转换为 `Eff.err().throw()`
+2. 将 `Effect.fail` 转换为 `Eff.throw(new ErrorClass())`
 3. 将服务替换为上下文效果
 4. 使用 `Eff.await` 替代 `Effect.tryPromise`
 

@@ -123,12 +123,9 @@ typings/
 .nuxt
 
 # rollup.js default build output
-dist/
-!dist/
-cjs/
-!cjs/
-esm/
-!esm
+dist
+cjs
+esm
 packages/*/dist/
 projects/*/dist/
 packages/*/cjs/

@@ -50,9 +50,11 @@ import { Eff } from 'koka'
 import { Eff } from 'koka'
 
 // 定义一个简单的效果函数
+class ValidationError extends Eff.Err('ValidationError')<string> {}
+
 function* greet(name: string) {
     if (!name) {
-        yield* Eff.err('ValidationError').throw('Name is required')
+        yield* Eff.throw(new ValidationError('Name is required'))
     }
     return `Hello, ${name}!`
 }
@@ -70,7 +72,7 @@ console.log(result) // 输出: "Hello, World!"
 这个简单的例子展示了 Koka 的核心概念：
 
 -   使用生成器函数定义效果
--   使用 `Eff.err()` 抛出错误效果
+-   使用 `Eff.throw()` 抛出错误效果
 -   使用 `Eff.try().handle()` 处理效果
 -   使用 `Eff.run()` 运行效果
 
@@ -81,9 +83,11 @@ console.log(result) // 输出: "Hello, World!"
 在 Koka 中，错误被表示为"效果"而不是异常。这意味着错误是类型安全的，并且可以在编译时检查。
 
 ```typescript
+class DivisionByZero extends Eff.Err('DivisionByZero')<string> {}
+
 function* divide(a: number, b: number) {
     if (b === 0) {
-        yield* Eff.err('DivisionByZero').throw('Cannot divide by zero')
+        yield* Eff.throw(new DivisionByZero('Cannot divide by zero'))
     }
     return a / b
 }
@@ -133,9 +137,12 @@ console.log(result) // 输出: "Handled: Cannot divide by zero"
 上下文效果允许你访问外部提供的值，类似于依赖注入：
 
 ```typescript
+class UserId extends Eff.Ctx('UserId')<string> {}
+class ApiKey extends Eff.Ctx('ApiKey')<string> {}
+
 function* getUserInfo() {
-    const userId = yield* Eff.ctx('UserId').get<string>()
-    const apiKey = yield* Eff.ctx('ApiKey').get<string>()
+    const userId = yield* Eff.get(UserId)
+    const apiKey = yield* Eff.get(ApiKey)
 
     return `User ${userId} with API key ${apiKey.slice(0, 5)}...`
 }
@@ -156,9 +163,12 @@ console.log(result) // 输出: "User 12345 with API key secre..."
 使用 `opt()` 方法可以获取可选的上下文值：
 
 ```typescript
+class Theme extends Eff.Opt('Theme')<string> {}
+class FontSize extends Eff.Opt('FontSize')<number> {}
+
 function* getUserPreferences() {
-    const theme = yield* Eff.ctx('Theme').opt<string>()
-    const fontSize = yield* Eff.ctx('FontSize').opt<number>()
+    const theme = yield* Eff.get(Theme)
+    const fontSize = yield* Eff.get(FontSize)
 
     return {
         theme: theme ?? 'light',
@@ -186,11 +196,13 @@ console.log(result2) // 输出: { theme: 'dark', fontSize: 14 }
 Koka 使用 `Eff.await()` 来处理异步操作：
 
 ```typescript
+class FetchError extends Eff.Err('FetchError')<string> {}
+
 async function* fetchUserData(userId: string) {
     const response = yield* Eff.await(fetch(`/api/users/${userId}`))
 
     if (!response.ok) {
-        yield* Eff.err('FetchError').throw(`Failed to fetch user: ${response.status}`)
+        yield* Eff.throw(new FetchError(`Failed to fetch user: ${response.status}`))
     }
 
     return response.json()
@@ -209,21 +221,25 @@ const result = await Eff.run(
 你可以在同一个生成器函数中混合使用同步和异步操作：
 
 ```typescript
+class ValidationError extends Eff.Err('ValidationError')<string> {}
+class ApiError extends Eff.Err('ApiError')<string> {}
+class ApiUrl extends Eff.Ctx('ApiUrl')<string> {}
+
 async function* processUser(userId: string) {
     // 同步验证
     if (!userId) {
-        yield* Eff.err('ValidationError').throw('User ID is required')
+        yield* Eff.throw(new ValidationError('User ID is required'))
     }
 
     // 获取配置（同步上下文）
-    const apiUrl = yield* Eff.ctx('ApiUrl').get<string>()
+    const apiUrl = yield* Eff.get(ApiUrl)
 
     // 异步获取数据
     const userData = yield* Eff.await(fetch(`${apiUrl}/users/${userId}`))
 
     // 处理响应
     if (!userData.ok) {
-        yield* Eff.err('ApiError').throw('API request failed')
+        yield* Eff.throw(new ApiError('API request failed'))
     }
 
     return userData.json()

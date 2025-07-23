@@ -34,7 +34,7 @@ export type AnyOpt = Opt<string, any>
 export type Msg<Name extends string, T> = {
     type: 'msg'
     name: Name
-    message?: T
+    message: T | EffSymbol
 }
 
 export type AnyMsg = Msg<string, any>
@@ -44,7 +44,7 @@ export interface SendMsg<Name extends string, T> extends Msg<Name, T> {
 }
 
 export interface WaitMsg<Name extends string, T> extends Msg<Name, T> {
-    message?: undefined
+    message: EffSymbol
 }
 
 export type EffType<T> = Err<string, T> | Ctx<string, T> | Opt<string, T> | Async | Msg<string, T>
@@ -146,7 +146,7 @@ export type MaybePromise<T> = T extends Promise<any> ? T : T | Promise<T>
 
 export type MaybeFunction<T> = T | (() => T)
 
-function Ctx<const Name extends string>(name: Name) {
+export function Ctx<const Name extends string>(name: Name) {
     return class Eff<T> {
         static field: Name = name
         type = 'ctx' as const
@@ -156,7 +156,7 @@ function Ctx<const Name extends string>(name: Name) {
     }
 }
 
-function Err<const Name extends string>(name: Name) {
+export function Err<const Name extends string>(name: Name) {
     return class Eff<E = void> {
         static field: Name = name
         type = 'err' as const
@@ -168,7 +168,7 @@ function Err<const Name extends string>(name: Name) {
     }
 }
 
-function Opt<const Name extends string>(name: Name) {
+export function Opt<const Name extends string>(name: Name) {
     return class Eff<T> extends Ctx(name)<T> {
         optional = true as const
         context = EffSymbol as EffSymbol | T
@@ -179,23 +179,23 @@ abstract class AbstractMsg<T> {
     static field: string = ''
     type = 'msg' as const
     abstract name: string
-    message: T
-    constructor(message: T) {
-        this.message = message
+    message: T | EffSymbol
+    constructor(...args: T extends undefined | void ? [] : [T]) {
+        this.message = args[0] as T | EffSymbol
     }
 }
 
-function Msg<const Name extends string>(name: Name) {
+export function Msg<const Name extends string>(name: Name) {
     return class Eff<T> extends AbstractMsg<T> {
         static field: Name = name
         name = name
     }
 }
 
-interface Wait<T extends AbstractMsg<any>> {
+export interface Wait<T extends AbstractMsg<any>> {
     type: 'msg'
     name: T['name']
-    message?: undefined
+    message: EffSymbol
 }
 
 export type CtxValue<C extends AnyCtx> = C['optional'] extends true
@@ -236,491 +236,506 @@ export type StreamResults<TaskReturn> = AsyncGenerator<StreamResult<TaskReturn>,
 
 export type StreamHandler<TaskReturn, HandlerReturn> = (results: StreamResults<TaskReturn>) => Promise<HandlerReturn>
 
-export class Eff {
-    static err = <const Name extends string>(name: Name) => {
-        return {
-            *throw<E = void>(...args: E extends void ? [] : [E]): Generator<Err<Name, E>, never> {
-                yield {
-                    type: 'err',
-                    name,
-                    error: args[0] as E,
-                }
-                /* istanbul ignore next */
-                throw new Error(`Unexpected resumption of error effect [${name}]`)
-            },
+function* throwError<E extends AnyErr>(err: E): Generator<E, never> {
+    yield err
+    /* istanbul ignore next */
+    throw new Error(`Unexpected resumption of error effect [${err.name}]`)
+}
+
+export { throwError as throw }
+
+export function* of<T>(value: T) {
+    return value
+}
+
+export function* get<C extends AnyCtx>(ctx: C | (new () => C)): Generator<C, CtxValue<C>> {
+    const context = yield typeof ctx === 'function' ? new ctx() : ctx
+
+    return context as CtxValue<C>
+}
+
+export function* send<T extends SendMsg<string, unknown>>(message: T): Generator<T, void> {
+    yield message
+}
+
+type ExtractMsgMessage<T> = T extends Msg<string, infer U> ? U : never
+
+export function* wait<MsgCtor extends typeof AbstractMsg<unknown>>(
+    msg: MsgCtor,
+): Generator<Wait<InstanceType<MsgCtor>>, ExtractMsgMessage<InstanceType<MsgCtor>>> {
+    const message = yield {
+        type: 'msg',
+        name: msg.field,
+        message: EffSymbol,
+    } as Wait<InstanceType<MsgCtor>>
+
+    return message as ExtractMsgMessage<InstanceType<MsgCtor>>
+}
+
+export function* communicate<const T extends {}>(
+    inputs: T,
+): Generator<Exclude<ExtractYield<T>, { type: 'msg' }>, ExtractReturn<T>> {
+    const gens = {} as Record<string, Generator<AnyEff, unknown>>
+    const results = {} as Record<string, unknown>
+
+    for (const [key, value] of Object.entries(inputs)) {
+        if (typeof value === 'function') {
+            gens[key] = value()
+        } else if (isGenerator(value)) {
+            gens[key] = value as Generator<AnyEff, unknown>
+        } else {
+            gens[key] = of(value)
         }
     }
 
-    static Err = Err
-
-    static *throw<E extends AnyErr>(err: E): Generator<E, never> {
-        yield err
-        /* istanbul ignore next */
-        throw new Error(`Unexpected resumption of error effect [${err.name}]`)
+    type SendStorageValue = {
+        type: 'send'
+        name: string
+        key: string
+        gen: Generator<AnyEff, unknown>
+        message: unknown
     }
 
-    static ctx = <const Name extends string>(name: Name) => {
-        return {
-            *get<T>(): Generator<Ctx<Name, T>, T> {
-                const context = yield {
-                    type: 'ctx',
-                    name,
-                    context: EffSymbol,
+    type WaitStorageValue = {
+        type: 'wait'
+        name: string
+        key: string
+        gen: Generator<AnyEff, unknown>
+    }
+
+    const sendStorage = {} as Record<string, SendStorageValue>
+    const waitStorage = {} as Record<string, WaitStorageValue>
+
+    const queue = [] as (SendStorageValue | WaitStorageValue)[]
+
+    const process = function* (
+        key: string,
+        gen: Generator<AnyEff, unknown>,
+        result: IteratorResult<AnyEff, unknown>,
+    ): Generator<AnyEff, void> {
+        while (!result.done) {
+            const effect = result.value
+
+            if (effect.type === 'msg') {
+                // Send a message
+                if (effect.message !== EffSymbol) {
+                    if (effect.name in waitStorage) {
+                        const waitItem = waitStorage[effect.name]
+                        delete waitStorage[effect.name]
+                        queue.splice(queue.indexOf(waitItem), 1)
+                        yield* process(waitItem.key, waitItem.gen, waitItem.gen.next(effect.message))
+                        result = gen.next()
+                    } else {
+                        sendStorage[effect.name] = {
+                            type: 'send',
+                            name: effect.name,
+                            key,
+                            gen,
+                            message: effect.message,
+                        }
+                        queue.push(sendStorage[effect.name])
+                        return
+                    }
+                } else {
+                    // Receive a message
+                    if (effect.name in sendStorage) {
+                        const sendedItem = sendStorage[effect.name]
+                        delete sendStorage[effect.name]
+                        queue.splice(queue.indexOf(sendedItem), 1)
+                        yield* process(key, gen, gen.next(sendedItem.message))
+                        yield* process(sendedItem.key, sendedItem.gen, sendedItem.gen.next())
+                        return
+                    } else {
+                        waitStorage[effect.name] = {
+                            type: 'wait',
+                            name: effect.name,
+                            key,
+                            gen,
+                        }
+                        queue.push(waitStorage[effect.name])
+                    }
+                    return
                 }
-
-                return context as T
-            },
-            *opt<T>(): Generator<Opt<Name, T>, T | undefined> {
-                const context = yield {
-                    type: 'ctx',
-                    name,
-                    context: EffSymbol,
-                    optional: true,
-                }
-
-                return context as T | undefined
-            },
-        }
-    }
-
-    static Ctx = Ctx
-    static Opt = Opt
-
-    static *get<C extends AnyCtx>(ctx: C | (new () => C)): Generator<C, CtxValue<C>> {
-        const context = yield typeof ctx === 'function' ? new ctx() : ctx
-
-        return context as CtxValue<C>
-    }
-
-    static msg = <const Name extends string>(name: Name) => {
-        return {
-            *send<T>(message: T): Generator<SendMsg<Name, T>, void> {
-                yield { type: 'msg', name, message }
-            },
-            *wait<T>(): Generator<WaitMsg<Name, T>, T> {
-                const message = yield { type: 'msg', name }
-                return message as T
-            },
-        }
-    }
-
-    static Msg = Msg
-
-    static *send<T extends SendMsg<string, unknown>>(message: T): Generator<T, void> {
-        yield message
-    }
-
-    static *wait<MsgCtor extends typeof AbstractMsg<unknown>>(
-        msg: MsgCtor,
-    ): Generator<Wait<InstanceType<MsgCtor>>, InstanceType<MsgCtor>['message']> {
-        const message = yield {
-            type: 'msg',
-            name: msg.field,
-        } as Wait<InstanceType<MsgCtor>>
-
-        return message as InstanceType<MsgCtor>['message']
-    }
-
-    static *communicate<const T extends {}>(
-        inputs: T,
-    ): Generator<Exclude<ExtractYield<T>, { type: 'msg' }>, ExtractReturn<T>> {
-        const gens = {} as Record<string, Generator<AnyEff, unknown>>
-        const results = {} as Record<string, unknown>
-
-        for (const [key, value] of Object.entries(inputs)) {
-            if (typeof value === 'function') {
-                gens[key] = value()
-            } else if (isGenerator(value)) {
-                gens[key] = value as Generator<AnyEff, unknown>
             } else {
-                gens[key] = Eff.of(value)
+                result = gen.next(yield effect)
             }
         }
 
-        type SendStorageValue = {
-            type: 'send'
-            name: string
-            key: string
-            gen: Generator<AnyEff, unknown>
-            message: unknown
+        results[key] = result.value
+    }
+
+    try {
+        for (const [key, gen] of Object.entries(gens)) {
+            yield* process(key, gen, gen.next()) as any
         }
 
-        type WaitStorageValue = {
-            type: 'wait'
-            name: string
-            key: string
-            gen: Generator<AnyEff, unknown>
+        while (queue.length > 0) {
+            const item = queue.shift()!
+
+            if (item.type === 'send') {
+                yield* process(
+                    item.key,
+                    item.gen,
+                    item.gen.throw(new Error(`Message '${item.name}' sent by '${item.key}' was not received`)),
+                ) as any
+            } else {
+                yield* process(
+                    item.key,
+                    item.gen,
+                    item.gen.throw(new Error(`Message '${item.name}' waited by '${item.key}' was not sent`)),
+                ) as any
+            }
         }
 
-        const sendStorage = {} as Record<string, SendStorageValue>
-        const waitStorage = {} as Record<string, WaitStorageValue>
+        if (Object.keys(results).length !== Object.keys(gens).length) {
+            throw new Error(`Some messages were not processed: ${JSON.stringify(Object.keys(gens))}`)
+        }
 
-        const queue = [] as (SendStorageValue | WaitStorageValue)[]
+        return results as ExtractReturn<T>
+    } finally {
+        for (const gen of Object.values(gens)) {
+            cleanUpGen(gen)
+        }
+    }
+}
 
-        const process = function* (
-            key: string,
-            gen: Generator<AnyEff, unknown>,
-            result: IteratorResult<AnyEff, unknown>,
-        ): Generator<AnyEff, void> {
-            while (!result.done) {
-                const effect = result.value
+export type StreamOptions = {
+    maxConcurrency?: number
+}
 
-                if (effect.type === 'msg') {
-                    // Send a message
-                    if (effect.message !== undefined) {
-                        if (effect.name in waitStorage) {
-                            const waitItem = waitStorage[effect.name]
-                            delete waitStorage[effect.name]
-                            queue.splice(queue.indexOf(waitItem), 1)
-                            yield* process(waitItem.key, waitItem.gen, waitItem.gen.next(effect.message))
-                            result = gen.next()
-                        } else {
-                            sendStorage[effect.name] = {
-                                type: 'send',
-                                name: effect.name,
-                                key,
-                                gen,
-                                message: effect.message,
-                            }
-                            queue.push(sendStorage[effect.name])
-                            return
-                        }
-                    } else {
-                        // Receive a message
-                        if (effect.name in sendStorage) {
-                            const sendedItem = sendStorage[effect.name]
-                            delete sendStorage[effect.name]
-                            queue.splice(queue.indexOf(sendedItem), 1)
-                            yield* process(key, gen, gen.next(sendedItem.message))
-                            yield* process(sendedItem.key, sendedItem.gen, sendedItem.gen.next())
-                            return
-                        } else {
-                            waitStorage[effect.name] = {
-                                type: 'wait',
-                                name: effect.name,
-                                key,
-                                gen,
-                            }
-                            queue.push(waitStorage[effect.name])
-                        }
-                        return
-                    }
-                } else {
-                    result = gen.next(yield effect)
+export type TaskProducer<Yield extends AnyEff, TaskReturn> = (index: number) => Task<Yield, TaskReturn> | undefined
+
+export type TaskInputs<Yield extends AnyEff, TaskReturn> =
+    | TaskProducer<Yield, TaskReturn>
+    | Array<Task<Yield, TaskReturn>>
+
+export function* stream<Yield extends AnyEff, TaskReturn, HandlerReturn>(
+    inputs: TaskInputs<Yield, TaskReturn>,
+    handler: StreamHandler<TaskReturn, HandlerReturn>,
+    options?: StreamOptions,
+): Generator<Async | Yield, HandlerReturn> {
+    const config = {
+        maxConcurrency: Number.POSITIVE_INFINITY,
+        ...options,
+    }
+
+    if (config.maxConcurrency < 1) {
+        throw new Error(`maxConcurrency must be greater than 0`)
+    }
+
+    const producer: TaskProducer<Yield, TaskReturn> = typeof inputs === 'function' ? inputs : (index) => inputs[index]
+
+    type ProcessingItem = {
+        type: 'initial'
+        gen: Generator<Yield, TaskReturn>
+        index: number
+    }
+
+    type ProcessedItem = {
+        type: 'completed'
+        index: number
+        gen: Generator<Yield, TaskReturn>
+        value: TaskReturn
+    }
+
+    type ProcessItem = ProcessingItem | ProcessedItem
+
+    type ProcessOk = {
+        type: 'ok'
+        item: ProcessItem
+        value: unknown
+    }
+
+    type ProcessErr = {
+        type: 'err'
+        item: ProcessItem
+        error: unknown
+    }
+
+    type ProcessResult = ProcessOk | ProcessErr
+
+    const items = [] as ProcessItem[]
+
+    let count = 0
+    let noTask = false
+    const getNextTask = () => {
+        if (noTask) {
+            return undefined
+        }
+
+        const task = producer(count++)
+
+        if (!task) {
+            noTask = true
+            return
+        }
+
+        const gen = typeof task === 'function' ? task() : task
+
+        return gen
+    }
+
+    while (count < config.maxConcurrency) {
+        const gen = getNextTask()
+
+        if (!gen) {
+            break
+        }
+
+        items.push({
+            type: 'initial',
+            gen,
+            index: items.length,
+        })
+    }
+
+    let controller = withResolvers<void>()
+
+    const processedItems = [] as ProcessedItem[]
+
+    async function* createAsyncGen(): StreamResults<TaskReturn> {
+        let count = 0
+
+        while (count < items.length) {
+            await controller.promise
+            while (processedItems.length > 0) {
+                const item = processedItems.shift()!
+                yield {
+                    index: item.index,
+                    value: item.value,
                 }
-            }
-
-            results[key] = result.value
-        }
-
-        try {
-            for (const [key, gen] of Object.entries(gens)) {
-                yield* process(key, gen, gen.next()) as any
-            }
-
-            while (queue.length > 0) {
-                const item = queue.shift()!
-
-                if (item.type === 'send') {
-                    yield* process(
-                        item.key,
-                        item.gen,
-                        item.gen.throw(new Error(`Message '${item.name}' sent by '${item.key}' was not received`)),
-                    ) as any
-                } else {
-                    yield* process(
-                        item.key,
-                        item.gen,
-                        item.gen.throw(new Error(`Message '${item.name}' waited by '${item.key}' was not sent`)),
-                    ) as any
-                }
-            }
-
-            if (Object.keys(results).length !== Object.keys(gens).length) {
-                throw new Error(`Some messages were not processed: ${JSON.stringify(Object.keys(gens))}`)
-            }
-
-            return results as ExtractReturn<T>
-        } finally {
-            for (const gen of Object.values(gens)) {
-                cleanUpGen(gen)
+                count++
             }
         }
     }
 
-    static *of<T>(value: T) {
-        return value
+    const asyncGen = createAsyncGen()
+
+    const cleanUpAllGen = () => {
+        // Clean up any remaining items
+        for (const item of items) {
+            if (item.type !== 'completed') {
+                cleanUpGen(item.gen)
+            }
+        }
     }
 
-    static *stream<Yield extends AnyEff, TaskReturn, HandlerReturn>(
-        inputs: Iterable<Task<Yield, TaskReturn>>,
-        handler: StreamHandler<TaskReturn, HandlerReturn>,
-    ): Generator<Async | Yield, HandlerReturn> {
-        type ProcessingItem = {
-            type: 'initial'
-            gen: Generator<Yield, TaskReturn>
-            index: number
-        }
+    type HandlerOk = {
+        type: 'ok'
+        value: HandlerReturn
+    }
 
-        type ProcessedItem = {
-            type: 'completed'
-            index: number
-            gen: Generator<Yield, TaskReturn>
-            value: TaskReturn
-        }
+    type HandlerErr = {
+        type: 'err'
+        error: unknown
+    }
 
-        type ProcessItem = ProcessingItem | ProcessedItem
+    type HandlerResult = HandlerOk | HandlerErr
 
-        type ProcessOk = {
-            type: 'ok'
-            item: ProcessItem
-            value: unknown
-        }
+    try {
+        const promises: Promise<void | HandlerResult>[] = []
+        const processResults: ProcessResult[] = []
 
-        type ProcessErr = {
-            type: 'err'
-            item: ProcessItem
-            error: unknown
-        }
-
-        type ProcessResult = ProcessOk | ProcessErr
-
-        const items = [] as ProcessItem[]
-
-        for (const input of inputs) {
-            const gen = typeof input === 'function' ? input() : input
-
-            items.push({
-                type: 'initial',
-                gen,
-                index: items.length,
-            })
-        }
-
-        let controller = withResolvers<void>()
-
-        const processedItems = [] as ProcessedItem[]
-
-        async function* createAsyncGen(): StreamResults<TaskReturn> {
-            let count = 0
-
-            while (count < items.length) {
-                await controller.promise
-                while (processedItems.length > 0) {
-                    const item = processedItems.shift()!
-                    yield {
-                        index: item.index,
-                        value: item.value,
-                    }
-                    count++
-                }
-            }
-        }
-
-        const asyncGen = createAsyncGen()
-
-        const cleanUpAllGen = () => {
-            // Clean up any remaining items
-            for (const item of items) {
-                if (item.type !== 'completed') {
-                    cleanUpGen(item.gen)
-                }
-            }
-        }
-
-        type HandlerOk = {
-            type: 'ok'
-            value: HandlerReturn
-        }
-
-        type HandlerErr = {
-            type: 'err'
-            error: unknown
-        }
-
-        type HandlerResult = HandlerOk | HandlerErr
-
-        try {
-            const promises: Promise<void | HandlerResult>[] = []
-            const processResults: ProcessResult[] = []
-
-            const wrapPromise = (promise: Promise<unknown>, item: ProcessItem): Promise<void> => {
-                const wrappedPromise: Promise<void> = promise.then(
-                    (value) => {
-                        promises.splice(promises.indexOf(wrappedPromise), 1)
-                        processResults.push({
-                            type: 'ok',
-                            item,
-                            value,
-                        })
-                    },
-                    (error: unknown) => {
-                        promises.splice(promises.indexOf(wrappedPromise), 1)
-                        processResults.push({
-                            type: 'err',
-                            item,
-                            error,
-                        })
-                    },
-                )
-
-                promises.push(wrappedPromise)
-
-                return wrappedPromise
-            }
-
-            const processItem = function* (
-                item: ProcessItem,
-                result: IteratorResult<Yield, TaskReturn>,
-            ): Generator<any, void, unknown> {
-                while (!result.done) {
-                    const effect = result.value
-
-                    if (effect.type === 'async') {
-                        wrapPromise(effect.promise, item)
-                        return
-                    } else {
-                        result = item.gen.next(yield effect)
-                    }
-                }
-
-                if (item.type === 'initial') {
-                    const processedItem: ProcessedItem = {
-                        type: 'completed',
-                        index: item.index,
-                        gen: item.gen,
-                        value: result.value,
-                    }
-                    items[item.index] = processedItem
-                    processedItems.push(processedItem)
-                } else if (item.type === 'completed') {
-                    throw new Error(
-                        `Unexpected completion of item that was already completed: ${JSON.stringify(item, null, 2)}`,
-                    )
-                } else {
-                    item satisfies never
-                    throw new Error(`Unexpected item type: ${JSON.stringify(item, null, 2)}`)
-                }
-            }
-
-            let handlerResult: HandlerResult | undefined
-
-            const handlerPromise = handler(asyncGen).then(
+        const wrapPromise = (promise: Promise<unknown>, item: ProcessItem): Promise<void> => {
+            const wrappedPromise: Promise<void> = promise.then(
                 (value) => {
-                    handlerResult = {
+                    promises.splice(promises.indexOf(wrappedPromise), 1)
+                    processResults.push({
                         type: 'ok',
+                        item,
                         value,
-                    }
-                    return handlerResult
+                    })
                 },
-                (error) => {
-                    handlerResult = {
+                (error: unknown) => {
+                    promises.splice(promises.indexOf(wrappedPromise), 1)
+                    processResults.push({
                         type: 'err',
+                        item,
                         error,
-                    }
-                    return handlerResult
+                    })
                 },
             )
 
-            promises.push(handlerPromise)
+            promises.push(wrappedPromise)
 
-            for (const item of items) {
-                yield* processItem(item, item.gen.next())
+            return wrappedPromise
+        }
+
+        const processItem = function* (
+            item: ProcessItem,
+            result: IteratorResult<Yield, TaskReturn>,
+        ): Generator<any, void, unknown> {
+            while (!result.done) {
+                const effect = result.value
+
+                if (effect.type === 'async') {
+                    wrapPromise(effect.promise, item)
+                    return
+                } else {
+                    result = item.gen.next(yield effect)
+                }
             }
 
-            while (promises.length > 0) {
-                if (handlerResult) {
+            if (item.type === 'initial') {
+                const processedItem: ProcessedItem = {
+                    type: 'completed',
+                    index: item.index,
+                    gen: item.gen,
+                    value: result.value,
+                }
+                items[item.index] = processedItem
+                processedItems.push(processedItem)
+
+                const gen = getNextTask()
+
+                if (!gen) {
+                    return
+                }
+
+                const newItem: ProcessItem = {
+                    type: 'initial',
+                    gen,
+                    index: items.length,
+                }
+
+                items.push(newItem)
+
+                yield* processItem(newItem, newItem.gen.next())
+            } else if (item.type === 'completed') {
+                throw new Error(
+                    `Unexpected completion of item that was already completed: ${JSON.stringify(item, null, 2)}`,
+                )
+            } else {
+                item satisfies never
+                throw new Error(`Unexpected item type: ${JSON.stringify(item, null, 2)}`)
+            }
+        }
+
+        let handlerResult: HandlerResult | undefined
+
+        const handlerPromise = handler(asyncGen).then(
+            (value) => {
+                handlerResult = {
+                    type: 'ok',
+                    value,
+                }
+                return handlerResult
+            },
+            (error) => {
+                handlerResult = {
+                    type: 'err',
+                    error,
+                }
+                return handlerResult
+            },
+        )
+
+        promises.push(handlerPromise)
+
+        for (const item of items) {
+            yield* processItem(item, item.gen.next())
+        }
+
+        while (promises.length > 0) {
+            if (handlerResult) {
+                break
+            }
+
+            if (promises.length !== 1) {
+                const result = yield* awaitEffect(Promise.race(promises))
+
+                if (result) {
                     break
                 }
-
-                if (promises.length !== 1) {
-                    const result = yield* Eff.await(Promise.race(promises))
-
-                    if (result) {
-                        break
-                    }
-                }
-
-                while (processResults.length > 0) {
-                    const processResult = processResults.shift()!
-                    const item = processResult.item
-
-                    let result: IteratorResult<Yield, TaskReturn>
-
-                    if (processResult.type === 'ok') {
-                        result = item.gen.next(processResult.value)
-                    } else {
-                        result = item.gen.throw(processResult.error)
-                    }
-
-                    yield* processItem(item, result)
-                }
-
-                if (processedItems.length > 0) {
-                    // Resolve the controller to allow the async generator to yield
-                    const previousController = controller
-                    controller = withResolvers()
-                    previousController.resolve()
-                }
-
-                if (promises.length === 1) {
-                    const result = yield* Eff.await(promises[0])
-
-                    if (result) {
-                        break
-                    }
-                }
             }
 
-            if (!handlerResult) {
-                throw new Error(`Handler did not resolve or reject`)
-            }
+            while (processResults.length > 0) {
+                const processResult = processResults.shift()!
+                const item = processResult.item
 
-            if (handlerResult.type === 'err') {
-                throw handlerResult.error
-            } else {
-                return handlerResult.value
-            }
-        } finally {
-            cleanUpAllGen()
-        }
-    }
+                let result: IteratorResult<Yield, TaskReturn>
 
-    static *combine<const T extends unknown[] | readonly unknown[] | {}>(
-        inputs: T,
-    ): Generator<ExtractYield<T> | Async, ExtractReturn<T>> {
-        if (Array.isArray(inputs)) {
-            return yield* Eff.all(inputs as any) as Generator<ExtractYield<T>, ExtractReturn<T>>
-        } else {
-            const result: Record<string, unknown> = {}
-            const gens = [] as Generator<AnyEff>[]
-            const keys = [] as string[]
-
-            for (const [key, value] of Object.entries(inputs)) {
-                if (typeof value === 'function') {
-                    gens.push(value())
-                } else if (isGenerator(value)) {
-                    gens.push(value as Generator<AnyEff>)
+                if (processResult.type === 'ok') {
+                    result = item.gen.next(processResult.value)
                 } else {
-                    gens.push(Eff.of(value))
+                    result = item.gen.throw(processResult.error)
                 }
-                keys.push(key)
+
+                yield* processItem(item, result)
             }
 
-            const values = (yield* Eff.all(gens) as any) as unknown[]
-
-            for (let i = 0; i < values.length; i++) {
-                result[keys[i]] = values[i]
+            if (processedItems.length > 0) {
+                // Resolve the controller to allow the async generator to yield
+                const previousController = controller
+                controller = withResolvers()
+                previousController.resolve()
             }
 
-            return result as ExtractReturn<T>
+            if (promises.length === 1) {
+                const result = yield* awaitEffect(promises[0])
+
+                if (result) {
+                    break
+                }
+            }
         }
-    }
 
-    static *all<Yield extends AnyEff, Return>(
-        inputs: Iterable<Task<Yield, Return>>,
-    ): Generator<Yield | Async, Return[]> {
-        const results = yield* Eff.stream(inputs, async (stream) => {
+        if (!handlerResult) {
+            throw new Error(`Handler did not resolve or reject`)
+        }
+
+        if (handlerResult.type === 'err') {
+            throw handlerResult.error
+        } else {
+            return handlerResult.value
+        }
+    } finally {
+        cleanUpAllGen()
+    }
+}
+
+export function* combine<const T extends unknown[] | readonly unknown[] | {}>(
+    inputs: T,
+): Generator<ExtractYield<T> | Async, ExtractReturn<T>> {
+    if (Array.isArray(inputs)) {
+        return yield* all(inputs as any) as Generator<ExtractYield<T>, ExtractReturn<T>>
+    } else {
+        const result: Record<string, unknown> = {}
+        const gens = [] as Generator<AnyEff>[]
+        const keys = [] as string[]
+
+        for (const [key, value] of Object.entries(inputs)) {
+            if (typeof value === 'function') {
+                gens.push(value())
+            } else if (isGenerator(value)) {
+                gens.push(value as Generator<AnyEff>)
+            } else {
+                gens.push(of(value))
+            }
+            keys.push(key)
+        }
+
+        const values = (yield* all(gens) as any) as unknown[]
+
+        for (let i = 0; i < values.length; i++) {
+            result[keys[i]] = values[i]
+        }
+
+        return result as ExtractReturn<T>
+    }
+}
+
+export type AllOptions = {
+    maxConcurrency?: number
+}
+
+export function* all<Yield extends AnyEff, Return>(
+    inputs: TaskInputs<Yield, Return>,
+    options?: AllOptions,
+): Generator<Yield | Async, Return[]> {
+    const results = yield* stream(
+        inputs,
+        async (stream) => {
             const results = [] as Return[]
 
             for await (const { index, value } of stream) {
@@ -728,182 +743,197 @@ export class Eff {
             }
 
             return results
-        })
+        },
+        options,
+    )
 
-        return results
-    }
+    return results
+}
 
-    static *race<Yield extends AnyEff, Return>(
-        inputs: Iterable<Task<Yield, Return>>,
-    ): Generator<Yield | Async, Return> {
-        const result = yield* Eff.stream(inputs, async (stream) => {
+export type RaceOptions = {
+    maxConcurrency?: number
+}
+
+export function* race<Yield extends AnyEff, Return>(
+    inputs: TaskInputs<Yield, Return>,
+    options?: RaceOptions,
+): Generator<Yield | Async, Return> {
+    const result = yield* stream(
+        inputs,
+        async (stream) => {
             for await (const { value } of stream) {
                 return value
             }
 
             throw new Error(`No results in race`)
-        })
+        },
+        options,
+    )
 
-        return result
-    }
+    return result
+}
 
-    static try = <Yield extends AnyEff, Return>(input: Task<Yield, Return>) => {
-        return {
-            *handle<Handlers extends Partial<EffectHandlers<Yield>>>(
-                handlers: Handlers,
-            ): Task<Exclude<Yield, { name: keyof Handlers }>, Return | ExtractErrorHandlerReturn<Handlers, Yield>> {
-                const gen = typeof input === 'function' ? input() : input
+function tryEffect<Yield extends AnyEff, Return>(input: Task<Yield, Return>) {
+    return {
+        *handle<Handlers extends Partial<EffectHandlers<Yield>>>(
+            handlers: Handlers,
+        ): Task<Exclude<Yield, { name: keyof Handlers }>, Return | ExtractErrorHandlerReturn<Handlers, Yield>> {
+            const gen = typeof input === 'function' ? input() : input
 
-                try {
-                    let result = gen.next()
+            try {
+                let result = gen.next()
 
-                    while (!result.done) {
-                        const effect = result.value
+                while (!result.done) {
+                    const effect = result.value
 
-                        if (effect.type === 'err') {
-                            const errorHandler = handlers[effect.name as keyof Handlers]
+                    if (effect.type === 'err') {
+                        const errorHandler = handlers[effect.name as keyof Handlers]
 
-                            if (typeof errorHandler === 'function') {
-                                return errorHandler(effect.error)
-                            } else {
-                                result = gen.next(yield effect as any)
-                            }
-                        } else if (effect.type === 'ctx') {
-                            const context = handlers[effect.name as keyof Handlers]
-
-                            if (context !== undefined) {
-                                result = gen.next(context)
-                            } else {
-                                result = gen.next(yield effect as any)
-                            }
-                        } else if (effect.type === 'async') {
-                            result = gen.next(yield effect as any)
-                        } else if (effect.type === 'msg') {
-                            result = gen.next(yield effect as any)
+                        if (typeof errorHandler === 'function') {
+                            return errorHandler(effect.error)
                         } else {
-                            effect satisfies never
-                            throw new Error(`Unexpected effect: ${JSON.stringify(effect, null, 2)}`)
+                            result = gen.next(yield effect as any)
                         }
+                    } else if (effect.type === 'ctx') {
+                        const context = handlers[effect.name as keyof Handlers]
+
+                        if (context !== undefined) {
+                            result = gen.next(context)
+                        } else {
+                            result = gen.next(yield effect as any)
+                        }
+                    } else if (effect.type === 'async') {
+                        result = gen.next(yield effect as any)
+                    } else if (effect.type === 'msg') {
+                        result = gen.next(yield effect as any)
+                    } else {
+                        effect satisfies never
+                        throw new Error(`Unexpected effect: ${JSON.stringify(effect, null, 2)}`)
                     }
-
-                    return result.value
-                } finally {
-                    cleanUpGen(gen)
                 }
-            },
-        }
+
+                return result.value
+            } finally {
+                cleanUpGen(gen)
+            }
+        },
     }
+}
 
-    static run<Return>(input: MaybeFunction<Generator<AnyOpt, Return>>): Return
-    static run<Return>(input: MaybeFunction<Generator<Async | AnyOpt, Return>>): MaybePromise<Return>
-    static run<Return>(input: MaybeFunction<Generator<Async | AnyOpt, Return>>): MaybePromise<Return> {
-        const gen = typeof input === 'function' ? input() : input
+export { tryEffect as try }
 
-        const process = (result: IteratorResult<Async | AnyOpt, Return>): MaybePromise<Return> => {
-            while (!result.done) {
-                const effect = result.value
+export function run<Return>(input: MaybeFunction<Generator<AnyOpt, Return>>): Return
+export function run<Return>(input: MaybeFunction<Generator<Async | AnyOpt, Return>>): MaybePromise<Return>
+export function run<Return>(input: MaybeFunction<Generator<Async | AnyOpt, Return>>): MaybePromise<Return> {
+    const gen = typeof input === 'function' ? input() : input
 
-                if (effect.type === 'async') {
-                    return effect.promise.then(
-                        (value) => {
-                            return process(gen.next(value))
-                        },
-                        (error) => {
-                            return process(gen.throw(error))
-                        },
-                    ) as MaybePromise<Return>
-                } else if (effect.type === 'ctx') {
-                    if (!effect.optional) {
-                        throw new Error(
-                            `Expected optional ctx, but got non-optional ctx: ${JSON.stringify(effect, null, 2)}`,
-                        )
-                    }
-                    result = gen.next()
-                } else {
-                    throw new Error(`Expected async effect, but got: ${JSON.stringify(effect, null, 2)}`)
+    const process = (result: IteratorResult<Async | AnyOpt, Return>): MaybePromise<Return> => {
+        while (!result.done) {
+            const effect = result.value
+
+            if (effect.type === 'async') {
+                return effect.promise.then(
+                    (value) => {
+                        return process(gen.next(value))
+                    },
+                    (error) => {
+                        return process(gen.throw(error))
+                    },
+                ) as MaybePromise<Return>
+            } else if (effect.type === 'ctx') {
+                if (!effect.optional) {
+                    throw new Error(
+                        `Expected optional ctx, but got non-optional ctx: ${JSON.stringify(effect, null, 2)}`,
+                    )
                 }
+                result = gen.next()
+            } else {
+                throw new Error(`Expected async effect, but got: ${JSON.stringify(effect, null, 2)}`)
             }
-
-            return result.value as MaybePromise<Return>
         }
 
-        return process(gen.next())
+        return result.value as MaybePromise<Return>
     }
 
-    static runSync<Return>(effect: MaybeFunction<Generator<AnyOpt, Return>>): Return {
-        const result = this.run(effect)
+    return process(gen.next())
+}
 
-        if (result instanceof Promise) {
-            throw new Error('Expected synchronous effect, but got asynchronous effect')
-        }
+export function runSync<Return>(effect: MaybeFunction<Generator<AnyOpt, Return>>): Return {
+    const result = run(effect)
 
-        return result
+    if (result instanceof Promise) {
+        throw new Error('Expected synchronous effect, but got asynchronous effect')
     }
 
-    static runAsync<Return>(input: MaybeFunction<Generator<Async | AnyOpt, Return>>): Promise<Return> {
-        return Promise.resolve(this.run(input))
+    return result
+}
+
+export function runAsync<Return>(input: MaybeFunction<Generator<Async | AnyOpt, Return>>): Promise<Return> {
+    return Promise.resolve(run(input))
+}
+
+export function runResult<Yield, Return>(
+    input: MaybeFunction<Generator<Yield, Return>>,
+): Async extends Yield ? MaybePromise<Ok<Return> | ExtractErr<Yield>> : Ok<Return> | ExtractErr<Yield> {
+    const gen = typeof input === 'function' ? input() : input
+
+    // @ts-ignore expected
+    return run(result(gen))
+}
+
+function* awaitEffect<T>(value: T | Promise<T>): Generator<Async, T> {
+    if (!(value instanceof Promise)) {
+        return value
     }
 
-    static runResult<Yield, Return>(
-        input: MaybeFunction<Generator<Yield, Return>>,
-    ): Async extends Yield ? MaybePromise<Ok<Return> | ExtractErr<Yield>> : Ok<Return> | ExtractErr<Yield> {
-        const gen = typeof input === 'function' ? input() : input
-
-        // @ts-ignore expected
-        return Eff.run(Eff.result(gen))
+    const result = yield {
+        type: 'async',
+        promise: value,
     }
 
-    static *await<T>(value: T | Promise<T>): Generator<Async, T> {
-        if (!(value instanceof Promise)) {
-            return value
-        }
+    return result as T
+}
 
-        const result = yield {
-            type: 'async',
-            promise: value,
-        }
+export { awaitEffect as await }
 
-        return result as T
-    }
+export function* result<Yield extends AnyEff, Return>(
+    gen: Generator<Yield, Return>,
+): Generator<ExcludeErr<Yield>, Ok<Return> | ExtractErr<Yield>> {
+    try {
+        let result = gen.next()
 
-    static *result<Yield extends AnyEff, Return>(
-        gen: Generator<Yield, Return>,
-    ): Generator<ExcludeErr<Yield>, Ok<Return> | ExtractErr<Yield>> {
-        try {
-            let result = gen.next()
+        while (!result.done) {
+            const effect = result.value
 
-            while (!result.done) {
-                const effect = result.value
-
-                if (effect.type === 'err') {
-                    return effect as ExtractErr<Yield>
-                } else {
-                    result = gen.next(yield effect as any)
-                }
+            if (effect.type === 'err') {
+                return effect as ExtractErr<Yield>
+            } else {
+                result = gen.next(yield effect as any)
             }
-
-            return {
-                type: 'ok',
-                value: result.value,
-            }
-        } finally {
-            cleanUpGen(gen)
         }
+
+        return {
+            type: 'ok',
+            value: result.value,
+        }
+    } finally {
+        cleanUpGen(gen)
     }
-    /**
-     * convert a generator to a generator that returns a value
-     * move the err from return to throw
-     */
-    static *ok<Yield, Return extends AnyOk | AnyErr>(
-        gen: Generator<Yield, Return>,
-    ): Generator<Yield | ExtractErr<Return>, InferOkValue<Return>> {
-        const result = yield* gen
+}
 
-        if (result.type === 'ok') {
-            return result.value
-        } else {
-            throw yield result as ExtractErr<Return>
-        }
+/**
+ * convert a generator to a generator that returns a value
+ * move the err from return to throw
+ */
+export function* ok<Yield, Return extends AnyOk | AnyErr>(
+    gen: Generator<Yield, Return>,
+): Generator<Yield | ExtractErr<Return>, InferOkValue<Return>> {
+    const result = yield* gen
+
+    if (result.type === 'ok') {
+        return result.value
+    } else {
+        throw yield result as ExtractErr<Return>
     }
 }
 

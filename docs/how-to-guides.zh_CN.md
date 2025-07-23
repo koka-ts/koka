@@ -256,14 +256,14 @@ class LogMessage extends Eff.Msg('Log')<string> {}
 function* userClient() {
     yield* Eff.send(new UserRequest({ userId: '123' }))
     const response = yield* Eff.wait(UserResponse)
-    yield* Eff.msg('Log').send(`Received user: ${response.user.name}`)
+    yield* Eff.send(new LogMessage(`Received user: ${response.user.name}`))
     return `Client: ${response.user.name}`
 }
 
 // 服务端生成器
 function* userServer() {
     const request = yield* Eff.wait(UserRequest)
-    yield* Eff.msg('Log').send(`Processing request for user: ${request.userId}`)
+    yield* Eff.send(new LogMessage(`Processing request for user: ${request.userId}`))
 
     const user = { id: request.userId, name: 'John Doe' }
     yield* Eff.send(new UserResponse({ user }))
@@ -273,8 +273,8 @@ function* userServer() {
 
 // 日志生成器
 function* logger() {
-    const log1 = yield* Eff.msg('Log').wait<string>()
-    const log2 = yield* Eff.msg('Log').wait<string>()
+    const log1 = yield* Eff.wait(LogMessage)
+    const log2 = yield* Eff.wait(LogMessage)
     return `Logger: ${log1}, ${log2}`
 }
 
@@ -395,7 +395,8 @@ async function* limitedConcurrency() {
 // 处理流中的错误
 function* failingGenerator(id: number) {
     if (id === 2) {
-        yield* Eff.err('StreamError').throw(`Error in generator ${id}`)
+        class StreamError extends Eff.Err('StreamError')<string> {}
+        yield* Eff.throw(new StreamError(`Error in generator ${id}`))
     }
     return `Data ${id}`
 }

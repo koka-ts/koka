@@ -38,16 +38,20 @@ pnpm add koka
 import { Eff } from 'koka'
 
 // 错误处理
+class ValidationError extends Eff.Err('ValidationError')<string> {}
+
 function* getUser(id: string) {
     if (!id) {
-        yield* Eff.err('ValidationError').throw('ID is required')
+        yield* Eff.throw(new ValidationError('ID is required'))
     }
     return { id, name: 'John Doe' }
 }
 
 // 上下文管理
+class Discount extends Eff.Ctx('Discount')<number> {}
+
 function* calculateTotal() {
-    const discount = yield* Eff.ctx('Discount').get<number>()
+    const discount = yield* Eff.get(Discount)
     return 100 * (1 - discount)
 }
 
