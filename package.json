@@ -8,6 +8,18 @@
     "author": "https://github.com/koka-ts",
     "main": "cjs/index.js",
     "types": "cjs/index.d.ts",
+    "exports": {
+        ".": {
+            "import": "./esm/index.js",
+            "require": "./cjs/index.js",
+            "types": "./cjs/index.d.ts"
+        },
+        "./msg": {
+            "import": "./esm/msg.js",
+            "require": "./cjs/msg.js",
+            "types": "./cjs/msg.d.ts"
+        }
+    },
     "files": [
         "cjs",
         "esm",
