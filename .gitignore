@@ -126,12 +126,8 @@ typings/
 dist
 cjs
 esm
-packages/*/dist/
-projects/*/dist/
-packages/*/cjs/
-projects/*/cjs/
-packages/*/esm/
-projects/*/esm/
+
+.kiro
 
 # Uncomment the public line if your project uses Gatsby
 # https://nextjs.org/blog/next-9-1#public-directory-support

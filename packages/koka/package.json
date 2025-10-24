@@ -1,0 +1,46 @@
+{
+    "name": "koka",
+    "version": "1.0.9",
+    "description": "Lightweight 3kB Effect-TS alternative library based on Algebraic Effects",
+    "keywords": [],
+    "repository": "github:koka-ts/koka",
+    "bugs": "https://github.com/koka-ts/koka/issues",
+    "author": "https://github.com/koka-ts",
+    "type": "module",
+    "exports": {
+        ".": "./src/koka.ts",
+        "./err": "./src/err.ts",
+        "./ctx": "./src/ctx.ts",
+        "./opt": "./src/opt.ts",
+        "./async": "./src/async.ts",
+        "./result": "./src/result.ts",
+        "./task": "./src/task.ts",
+        "./gen": "./src/gen.ts"
+    },
+    "files": [
+        "src"
+    ],
+    "engines": {
+        "node": ">=22.18"
+    },
+    "scripts": {
+        "test": "jest",
+        "test:coverage": "jest --collectCoverage --coverage"
+    },
+    "dependencies": {
+        "tslib": "^2.3.1"
+    },
+    "devDependencies": {
+        "@types/jest": "^27.5.0",
+        "jest": "^27.5.1",
+        "ts-jest": "^27.1.4",
+        "rimraf": "^3.0.2",
+        "shx": "^0.3.4",
+        "tsx": "^4.7.0",
+        "typescript": "^5.8.0",
+        "npm-run-all": "^4.1.5"
+    },
+    "publishConfig": {
+        "access": "public"
+    }
+}

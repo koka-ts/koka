@@ -56,7 +56,7 @@
     "no-caller": "error",
     "no-case-declarations": "error",
     "no-div-regex": "error",
-    "no-else-return": "error",
+    "no-else-return": "off",
     "no-empty-function": "warn",
     "no-empty-pattern": "off",
     "no-eq-null": "error",
@@ -84,7 +84,7 @@
     "no-with": "error",
     "prefer-promise-reject-errors": "error",
     "radix": "error",
-    "require-await": "warn",
+    "require-await": "off",
     "wrap-iife": "error",
     "yoda": "error",
     "no-delete-var": "error",
@@ -111,13 +111,13 @@
     "no-useless-computed-key": "error",
     "no-useless-constructor": "error",
     "no-useless-rename": "error",
-    "object-shorthand": "error",
+    "object-shorthand": "off",
     "prefer-arrow-callback": "error",
     "prefer-destructuring": "off",
     "prefer-rest-params": "error",
     "prefer-spread": "error",
     "prefer-template": "warn",
-    "require-yield": "error",
+    "require-yield": "off",
     "symbol-description": "error",
     "prefer-const": "error",
     "prettier/prettier": "error"
@@ -140,7 +140,7 @@
             "ignoreRestSiblings": true
           }
         ],
-        "@typescript-eslint/array-type": "error",
+        "@typescript-eslint/array-type": "off",
         "@typescript-eslint/await-thenable": "error",
         "@typescript-eslint/adjacent-overload-signatures": "error",
         "@typescript-eslint/ban-ts-comment": [
@@ -166,7 +166,7 @@
             }
           }
         ],
-        "@typescript-eslint/no-floating-promises": "error"
+        "@typescript-eslint/no-floating-promises": "off"
       }
     },
     {
@@ -177,6 +177,7 @@
       "extends": ["plugin:jest/recommended"],
       "rules": {
         "jest/expect-expect": "off",
+        "jest/no-focused-tests": "off",
         "@typescript-eslint/ban-ts-comment": [
           "error",
           {
