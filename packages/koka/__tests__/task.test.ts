@@ -1415,7 +1415,9 @@ describe('Task.concurrent with complex error scenarios', () => {
             return results
         }
 
-        const result = await Koka.runAsync(Task.concurrent(producer, handler))
+        const task = Task.concurrent(producer, handler)
+
+        const result = await Koka.runAsync(task)
         expect(result).toEqual([])
     })
 })

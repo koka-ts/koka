@@ -505,7 +505,7 @@ class QueryStorageOpt extends Opt.Opt('koka-domain/query-storage-opt')<QueryStor
 const queryStorages = new WeakMap<Query<any, any>, QueryStorage>()
 
 export function query() {
-    return function <This extends AnyDomain, Return, Yield extends Koka.AnyEff>(
+    return function <This extends AnyDomain, Return, Yield extends Koka.AnyEff = never>(
         target: (this: This) => Generator<Yield | QueryOpt, Return>,
         context: KokaClassMethodDecoratorContext<This, typeof target>,
     ): typeof target {
@@ -622,7 +622,7 @@ export function query() {
 
 const queryResultWeakMap = new WeakMap<Query<any, any>, Result.Result<any, any>>()
 
-export function getQueryResult<Return, E extends Err.AnyErr = Err.AnyErr>(
+export function getQueryResult<Return, E extends Err.AnyErr = never>(
     query: Query<Return, E>,
 ): Result.Result<Return, E> {
     const result = Result.runSync(query())
@@ -638,7 +638,7 @@ export function getQueryResult<Return, E extends Err.AnyErr = Err.AnyErr>(
     return result as Result.Result<Return, E>
 }
 
-export function getQueryState<Return, Yield extends Err.AnyErr = Err.AnyErr>(query: Query<Return, Yield>): Return {
+export function getQueryState<Return, Yield extends Err.AnyErr = never>(query: Query<Return, Yield>): Return {
     const result = getQueryResult(query)
 
     if (result.type === 'err') {
@@ -648,7 +648,7 @@ export function getQueryState<Return, Yield extends Err.AnyErr = Err.AnyErr>(que
     return result.value
 }
 
-export function subscribeQueryResult<Return, Yield extends Err.AnyErr = Err.AnyErr>(
+export function subscribeQueryResult<Return, Yield extends Err.AnyErr = never>(
     query: Query<Return, Yield>,
     listener: (result: Result.Result<Return, Err.ExtractErr<Yield>>) => unknown,
 ): () => void {
@@ -672,7 +672,7 @@ export function subscribeQueryResult<Return, Yield extends Err.AnyErr = Err.AnyE
     })
 }
 
-export function subscribeQueryState<Return, Yield extends Err.AnyErr = Err.AnyErr>(
+export function subscribeQueryState<Return, Yield extends Err.AnyErr = never>(
     query: Query<Return, Yield>,
     listener: (state: Return) => unknown,
 ): () => void {

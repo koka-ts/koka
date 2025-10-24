@@ -34,7 +34,7 @@ describe('Result', () => {
     })
 })
 
-describe('Result.toErr', () => {
+describe('Result.unwrap and Result.wrap', () => {
     it('test success', () => {
         function* success() {
             return Result.ok(42)
@@ -81,7 +81,7 @@ describe('run Result', () => {
             return value
         }
 
-        const result: Promise<Result.Ok<number> | Err.AnyErr> = Result.runAsync(program(42))
+        const result: Promise<Result.Ok<number> | ZeroError> = Result.runAsync(program(42))
 
         expect(await result).toEqual({
             type: 'ok',
@@ -97,7 +97,7 @@ describe('run Result', () => {
             return 'should not reach here'
         }
 
-        const result: Result.Result<string, Err.AnyErr> = Result.runSync(program)
+        const result: Result.Result<string, TestError> = Result.runSync(program)
 
         expect(result).toEqual({
             type: 'err',

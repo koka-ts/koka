@@ -32,7 +32,7 @@ export const err = <Name extends string, T>(name: Name, error: T): Err.Err<Name,
 
 export type InferOkValue<T> = T extends Ok<infer U> ? U : never
 
-export function* wrap<Yield extends Koka.AnyEff, Return>(
+export function* wrap<Return, Yield extends Koka.AnyEff = never>(
     gen: Generator<Yield, Return>,
 ): Generator<Err.ExcludeErr<Yield>, Ok<Return> | Err.ExtractErr<Yield>> {
     try {
@@ -73,14 +73,16 @@ export function* unwrap<Yield, Return extends AnyOk | Err.AnyErr>(
     }
 }
 
-export function runSync<E extends Err.AnyErr, Return>(input: Koka.Effector<Opt.AnyOpt | E, Return>): Ok<Return> | E {
+export function runSync<E extends Err.AnyErr | Opt.AnyOpt, Return>(
+    input: Koka.Effector<E, Return>,
+): Ok<Return> | Err.ExtractErr<E> {
     const gen = typeof input === 'function' ? input() : input
     return Koka.runSync(wrap(gen as any) as any)
 }
 
-export function runAsync<E extends Err.AnyErr, Return>(
-    input: Koka.Effector<Async.Async | Opt.AnyOpt | E, Return>,
-): Promise<Ok<Return> | E> {
+export function runAsync<E extends Err.AnyErr | Opt.AnyOpt | Async.Async, Return>(
+    input: Koka.Effector<E, Return>,
+): Promise<Ok<Return> | Err.ExtractErr<E>> {
     const gen = typeof input === 'function' ? input() : input
     return Koka.runAsync(wrap(gen as any) as any)
 }

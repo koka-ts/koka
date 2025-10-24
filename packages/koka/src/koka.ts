@@ -82,7 +82,7 @@ function tryEffect<Yield extends AnyEff, Return>(input: Effector<Yield, Return>)
 
 export { tryEffect as try }
 
-export function runSync<Return>(input: Effector<AnyOpt, Return>): Return {
+export function runSync<E extends AnyOpt, Return>(input: Effector<E, Return>): Return {
     const gen = typeof input === 'function' ? input() : input
     let result = gen.next()
 
@@ -99,7 +99,7 @@ export function runSync<Return>(input: Effector<AnyOpt, Return>): Return {
     return result.value
 }
 
-export function runAsync<Return>(input: Effector<Async | AnyOpt, Return>): Promise<Return> {
+export function runAsync<E extends Async | AnyOpt, Return>(input: Effector<E, Return>): Promise<Return> {
     const gen = typeof input === 'function' ? input() : input
 
     const process = (result: IteratorResult<Async | AnyOpt, Return>): MaybePromise<Return> => {

@@ -14,15 +14,18 @@ function TodoItem(props: TodoItemProps) {
     const todo = useDomainState(todo$)
 
     const handleToggle = () => {
-        Koka.runThrow(todo$.toggleTodo())
+        // @ts-expect-error for test
+        Koka.runSync(todo$.toggleTodo())
     }
 
     const handleRemove = () => {
-        Koka.runThrow(todo$.removeTodo())
+        // @ts-expect-error for test
+        Koka.runAsync(todo$.removeTodo())
     }
 
     const handleTextChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-        Koka.runThrow(todo$.updateTodoText(e.target.value))
+        // @ts-expect-error for test
+        Koka.runSync(todo$.updateTodoText(e.target.value))
     }
 
     return (
@@ -75,7 +78,8 @@ function TodoInput(props: TodoInputProps) {
     }
 
     const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-        Koka.runThrow(todoApp$.updateInput(e.target.value))
+        // @ts-expect-error for test
+        Koka.runAsync(todoApp$.updateInput(e.target.value))
     }
 
     return (
@@ -106,7 +110,8 @@ function TodoFilter(props: TodoFilterProps) {
     const currentFilter = useDomainState(filter$)
 
     const handleFilterChange = (filter: TodoFilter) => {
-        Koka.runThrow(filter$.setFilter(filter))
+        // @ts-expect-error for test
+        Koka.runSync(filter$.setFilter(filter))
     }
 
     const filterButtons = [
@@ -173,7 +178,8 @@ function TodoListHeader(props: TodoListHeaderProps) {
     const allCompleted = todoDoneList.length > 0 && todoDoneList.every((done) => done)
 
     const handleToggleAll = () => {
-        Koka.runThrow(props.todoList$.toggleAll())
+        // @ts-expect-error for test
+        Koka.runSync(props.todoList$.toggleAll())
     }
 
     return (
@@ -221,7 +227,8 @@ function TodoListFooter(props: TodoListFooterProps) {
     const hasCompleted = todoDoneList.length > 0 && todoDoneList.some((done) => done)
 
     const handleClearCompleted = () => {
-        Koka.runThrow(todoList$.clearCompleted())
+        // @ts-expect-error for test
+        Koka.runSync(todoList$.clearCompleted())
     }
 
     if (!hasCompleted) {
