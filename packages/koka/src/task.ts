@@ -1,21 +1,7 @@
 import * as Async from './async.ts'
 import * as Gen from './gen.ts'
 import type * as Koka from './koka.ts'
-
-const withResolvers: <T>() => PromiseWithResolvers<T> =
-    Promise.withResolvers?.bind(Promise) ??
-    (<T>() => {
-        let resolve: (value: T) => void
-        let reject: (reason?: any) => void
-
-        const promise = new Promise<T>((res, rej) => {
-            resolve = res
-            reject = rej
-        })
-
-        // @ts-ignore as expected
-        return { promise, resolve, reject }
-    })
+import { withResolvers } from './util.ts'
 
 type StreamOptions<T> = {
     values?: T[]
@@ -465,4 +451,8 @@ export function* race<Return, Yield extends Koka.AnyEff = never>(
     )
 
     return result
+}
+
+export function* delay(ms: number): Generator<Async.Async, void> {
+    yield* Async.await(new Promise((resolve) => setTimeout(resolve, ms)))
 }
