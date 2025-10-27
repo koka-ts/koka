@@ -1,6 +1,6 @@
 import * as Async from './async.ts'
 import * as Gen from './gen.ts'
-import type * as Koka from './koka.ts'
+import * as Koka from './koka.ts'
 import { withResolvers } from './util.ts'
 
 type StreamOptions<T> = {
@@ -89,7 +89,7 @@ const createTaskConsumer = <TaskReturn, Yield extends Koka.AnyEff = never>(input
             return
         }
 
-        const gen = typeof task === 'function' ? task() : task
+        const gen = Koka.runEffector(task)
 
         return gen
     }

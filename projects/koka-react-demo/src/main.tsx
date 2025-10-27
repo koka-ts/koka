@@ -13,6 +13,7 @@ import {
 } from './domain'
 import './index.css'
 import App from './App.tsx'
+import './test.ts'
 
 type AppState = {
     todoAppList: TodoApp[]

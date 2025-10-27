@@ -33,8 +33,9 @@ export const err = <Name extends string, T>(name: Name, error: T): Err.Err<Name,
 export type InferOkValue<T> = T extends Ok<infer U> ? U : never
 
 export function* wrap<Return, Yield extends Koka.AnyEff = never>(
-    gen: Generator<Yield, Return>,
+    effector: Koka.Effector<Yield, Return>,
 ): Generator<Err.ExcludeErr<Yield>, Ok<Return> | Err.ExtractErr<Yield>> {
+    const gen = Koka.runEffector(effector)
     try {
         let result = gen.next()
 
@@ -61,9 +62,10 @@ export function* wrap<Return, Yield extends Koka.AnyEff = never>(
  * convert a generator to a generator that returns a value
  * move the err from return to throw
  */
-export function* unwrap<Yield, Return extends AnyOk | Err.AnyErr>(
-    gen: Generator<Yield, Return>,
+export function* unwrap<Return extends AnyOk | Err.AnyErr, Yield>(
+    effector: Koka.Effector<Yield, Return>,
 ): Generator<Yield | Err.ExtractErr<Return>, InferOkValue<Return>> {
+    const gen = Koka.runEffector(effector)
     const result = yield* gen
 
     if (result.type === 'ok') {
@@ -73,16 +75,16 @@ export function* unwrap<Yield, Return extends AnyOk | Err.AnyErr>(
     }
 }
 
-export function runSync<E extends Err.AnyErr | Opt.AnyOpt, Return>(
-    input: Koka.Effector<E, Return>,
+export function runSync<E extends Err.AnyErr | Opt.AnyOpt | Koka.Final, Return>(
+    effector: Koka.Effector<E, Return>,
 ): Ok<Return> | Err.ExtractErr<E> {
-    const gen = typeof input === 'function' ? input() : input
+    const gen = Koka.runEffector(effector)
     return Koka.runSync(wrap(gen as any) as any)
 }
 
-export function runAsync<E extends Err.AnyErr | Opt.AnyOpt | Async.Async, Return>(
-    input: Koka.Effector<E, Return>,
+export function runAsync<E extends Err.AnyErr | Opt.AnyOpt | Async.Async | Koka.Final, Return>(
+    effector: Koka.Effector<E, Return>,
 ): Promise<Ok<Return> | Err.ExtractErr<E>> {
-    const gen = typeof input === 'function' ? input() : input
+    const gen = Koka.runEffector(effector)
     return Koka.runAsync(wrap(gen as any) as any)
 }

@@ -9,7 +9,7 @@ export * from './constant.ts'
 type FinalEffector = Effector<AnyEff, void>
 
 export type Final = {
-    type: 'final',
+    type: 'final'
     effector: FinalEffector
 }
 
@@ -31,32 +31,81 @@ export type EffectHandlers<Effect> = UnionToIntersection<ToHandler<Effect>>
 
 type ExtractErrorHandlerReturn<Handlers, Eff> = Eff extends Err<infer Name, infer U>
     ? Name extends keyof Handlers
-    ? Handlers[Name] extends (error: U) => infer R
-    ? R
+        ? Handlers[Name] extends (error: U) => infer R
+            ? R
+            : never
+        : never
     : never
+
+export type Effector<Yield, Return> = (() => Generator<Yield, Return>) | GeneratorIterable<Yield, Return>
+
+type GeneratorIterable<Yield, Return> = {
+    [Symbol.iterator]: () => Generator<Yield, Return>
+}
+
+export function runEffector<Yield, Return>(effector: Effector<Yield, Return>): Generator<Yield, Return> {
+    return typeof effector === 'function' ? effector() : effector[Symbol.iterator]()
+}
+
+type InferPhaseYield<G extends GeneratorIterable<any, any>> = G extends GeneratorIterable<infer Yield, any>
+    ? Yield
     : never
+
+type InferPhaseReturn<G extends GeneratorIterable<any, any>> = G extends GeneratorIterable<any, infer Return>
+    ? Return
     : never
 
-export type Effector<Yield, Return> = Generator<Yield, Return> | (() => Generator<Yield, Return>)
+abstract class EffPhase {
+    abstract [Symbol.iterator](): Generator<AnyEff, unknown>
+    runAsync(
+        this: InferPhaseYield<this> extends Async | AnyOpt | Final ? this : `runAsync is not available for this type`,
+        options?: RunAsyncOptions,
+    ): Promise<InferPhaseReturn<this>> {
+        return runAsync(this as any, options)
+    }
+    runSync(
+        this: InferPhaseYield<this> extends AnyOpt | Final ? this : `runSync is not available for this type`,
+    ): InferPhaseReturn<this> {
+        return runSync(this as any)
+    }
+}
 
-export type HandledEffector<Yield extends AnyEff, Return, Handlers extends Partial<EffectHandlers<Yield>>> =
-    Generator<Exclude<Yield, { name: keyof Handlers }>, Return | ExtractErrorHandlerReturn<Handlers, Yield>>
+class TryPhase<Yield extends AnyEff, Return> extends EffPhase {
+    effector: Effector<Yield, Return>
+    constructor(effector: Effector<Yield, Return>) {
+        super()
+        this.effector = effector
+    }
+    [Symbol.iterator]() {
+        return runEffector(this.effector)
+    }
+    handle<Handlers extends Partial<EffectHandlers<Yield>>>(handlers: Handlers) {
+        return new HandledPhase(this.effector, handlers)
+    }
+    finally<Eff extends AnyEff = never>(effector: Effector<Eff, void>) {
+        return new FinalPhase<Yield | Eff, Return>(this.effector, effector)
+    }
+}
 
-export type FinalEffHandler<Yield, Return> = <Eff extends AnyEff = never>(effector: FinalEffector) => Generator<Yield | Eff | Final, Return>
+class HandledPhase<Yield extends AnyEff, Return, Handlers extends Partial<EffectHandlers<Yield>>> extends EffPhase {
+    effector: Effector<Yield, Return>
+    handlers: Handlers
+    constructor(effector: Effector<Yield, Return>, handlers: Handlers) {
+        super()
+        this.effector = effector
+        this.handlers = handlers
+    }
+    *handleEffects(): Generator<
+        Exclude<Yield, { name: keyof Handlers }> | Final,
+        Return | ExtractErrorHandlerReturn<Handlers, Yield>
+    > {
+        const effector = this.effector
+        const handlers = this.handlers
+        const gen = runEffector(effector)
+        let result = gen.next()
+        let status: 'returned' | 'thrown' | 'running' = 'running'
 
-function tryEffect<Yield extends AnyEff, Return>(input: Effector<Yield, Return>) {
-    const handleEffect = function <Handlers extends Partial<EffectHandlers<Yield>>>(
-        handlers: Handlers,
-    ): Generator<Exclude<Yield, { name: keyof Handlers }>, Return | ExtractErrorHandlerReturn<Handlers, Yield>> & {
-        finally: FinalEffHandler<Exclude<Yield, { name: keyof Handlers }>, Return | ExtractErrorHandlerReturn<Handlers, Yield>>
-    } {
-        type NewYield = Exclude<Yield, { name: keyof Handlers }>
-        type NewReturn = Return | ExtractErrorHandlerReturn<Handlers, Yield>
-
-        function* createHandledGen(): HandledEffector<Yield, Return, Handlers> {
-            const gen = typeof input === 'function' ? input() : input
-            let result = gen.next()
-
+        try {
             while (!result.done) {
                 const effect = result.value
 
@@ -66,12 +115,12 @@ function tryEffect<Yield extends AnyEff, Return>(input: Effector<Yield, Return>)
                     if (typeof errorHandler === 'function') {
                         const finalEffector = extractFinalEffector(gen)
                         if (finalEffector) {
-                            const finalEffectorGen = typeof finalEffector === 'function' ? finalEffector() : finalEffector
+                            const finalEffectorGen = runEffector(finalEffector)
                             /**
                              * If there is an error handler, we need to first run the final effectors before calling the error handler
                              * This ensures that any cleanup or finalization logic is executed, because the err effect will not be resumed
                              */
-                            yield* finalEffectorGen as any
+                            yield* finalEffectorGen as Generator<any, void>
                         }
 
                         return errorHandler(effect.error)
@@ -97,109 +146,84 @@ function tryEffect<Yield extends AnyEff, Return>(input: Effector<Yield, Return>)
                 }
             }
 
-            return result.value
-        }
-
-        function* createFinalGen(): Generator<NewYield | Final, NewReturn> {
-            let gen = createHandledGen()
-            let status: 'return' | undefined
-            try {
-                let result = gen.next()
-
-                while (!result.done) {
-                    const effect = result.value
-                    result = gen.next(yield effect as any)
-                }
-
-                status = 'return'
-                return result.value
-            } catch (error) {
-                let result = gen.throw(error)
-
-                while (!result.done) {
-                    const effect = result.value
-                    result = gen.next(yield effect as any)
-                }
-
-                status = 'return'
-                return result.value
-            } finally {
-                console.log('createFinalGen finally block, status:', status)
-                if (status === undefined) {
-                    const finalEffector = extractFinalEffector(gen)
-                    console.log('createFinalGen extracted finalEffector:', finalEffector)
-                    if (finalEffector) {
-                        /**
-                         * If the generator is being finalized without a known status (i.e., not from return or throw, but aborted),
-                         * we need to handle the final effect with the same handlers to ensure effects in the finally blocks of sub-generators are also handled.
-                         */
-                        yield {
-                            type: 'final',
-                            effector: tryEffect(finalEffector).handle(handlers as any) as any,
-                        }
-                    }
-                }
-            }
-        }
-
-        const gen = createFinalGen() as HandledEffector<Yield, Return, Handlers> & {
-            finally: FinalEffHandler<NewYield, NewReturn>
-        }
-
-        gen.finally = function (effector) {
-            return tryEffect(gen).finally(effector)
-        }
-
-        return gen
-    }
-
-    const handleFinalEffect = (function* (finalEffector) {
-        const gen = typeof input === 'function' ? input() : input
-        let status: 'return' | undefined
-        try {
-            let result = gen.next()
-
-            while (!result.done) {
-                const effect = result.value
-                result = gen.next(yield effect as any)
-            }
-
-            status = 'return'
-
+            status = 'returned'
             return result.value
         } catch (error) {
-
-            let result = gen.throw(error)
-
-            while (!result.done) {
-                const effect = result.value
-                result = gen.next(yield effect as any)
+            const finalEffector = extractFinalEffector(gen)
+            if (finalEffector) {
+                const finalGen = runEffector(new TryPhase(finalEffector).handle(this.handlers))
+                yield* finalGen as Generator<any, void>
             }
-
-            status = 'return'
-            return result.value
+            status = 'thrown'
+            throw error
         } finally {
-            console.log('handleFinalEffect finally block, status:', status)
-            if (status !== undefined) {
-                const finalGen = typeof finalEffector === 'function' ? finalEffector() : finalEffector
-                yield* finalGen
-            } else {
-                const childFinalEffector = extractFinalEffector(gen)
+            const finalEffector = status === 'running' ? extractFinalEffector(gen) : undefined
 
-                if (childFinalEffector) {
-                    yield {
-                        type: 'final',
-                        effector: mergeFinalEffectors(childFinalEffector, finalEffector),
-                    }
-                }
+            if (finalEffector) {
+                yield {
+                    type: 'final',
+                    effector: new TryPhase(finalEffector).handle(this.handlers),
+                } as Final
             }
         }
-    }) as FinalEffHandler<Yield, Return>
-
-    return {
-        handle: handleEffect,
-        finally: handleFinalEffect,
     }
+    [Symbol.iterator]() {
+        return this.handleEffects()
+    }
+    finally<Eff extends AnyEff = never>(effector: Effector<Eff, void>) {
+        const gen = this[Symbol.iterator]()
+        return new FinalPhase(gen, effector)
+    }
+}
+
+class FinalPhase<Yield extends AnyEff, Return> extends EffPhase {
+    effector: Effector<Yield, Return>
+    finalEffector: FinalEffector
+    constructor(effector: Effector<Yield, Return>, finalEffector: FinalEffector) {
+        super()
+        this.effector = effector
+        this.finalEffector = finalEffector
+    }
+    *[Symbol.iterator](): Generator<Yield | Final, Return> {
+        const gen = runEffector(this.effector)
+        const finalEffector = this.finalEffector
+        let status: 'returned' | 'thrown' | 'running' = 'running'
+        try {
+            let result = gen.next()
+            while (!result.done) {
+                result = gen.next(yield result.value)
+            }
+            status = 'returned'
+            return result.value
+        } catch (error) {
+            const childFinalEffector = extractFinalEffector(gen)
+            if (childFinalEffector) {
+                const finalGen = runEffector(childFinalEffector)
+                yield* finalGen as Generator<any, void>
+            }
+            status = 'thrown'
+            throw error
+        } finally {
+            if (status === 'running') {
+                const childFinalEffector = extractFinalEffector(gen)
+                const combinedFinalEffector = childFinalEffector
+                    ? serializeEffectors(childFinalEffector, finalEffector)
+                    : finalEffector
+
+                yield {
+                    type: 'final',
+                    effector: combinedFinalEffector,
+                }
+            } else {
+                const finalGen = runEffector(finalEffector)
+                yield* finalGen as any
+            }
+        }
+    }
+}
+
+function tryEffect<Yield extends AnyEff, Return>(effector: Effector<Yield, Return>) {
+    return new TryPhase(effector)
 }
 
 export { tryEffect as try }
@@ -208,18 +232,15 @@ const extractFinalEffector = function (gen: Generator<AnyEff, any>) {
     let finalEffector: FinalEffector | undefined
     let result = (gen as any).return(undefined)
 
-    console.log('extractFinalEffector initial result:', result)
-
     while (!result.done) {
         const effect = result.value
-        console.log('extractFinalEffector effect:', effect)
         if (effect?.type === 'final') {
             if (finalEffector) {
-                throw new Error(`Multiple 'final' effects yielded. Only one 'final' effect is allowed.`)
+                throw new Error(`[Koka]Multiple 'final' effects yielded. Only one 'final' effect is allowed.`)
             }
             finalEffector = effect.effector
         } else {
-            throw new Error(`Unsupported yield value in 'finally block': ${JSON.stringify(effect, null, 2)}`)
+            throw new Error(`[Koka]Unsupported yield value in 'finally block': ${JSON.stringify(effect, null, 2)}`)
         }
 
         result = (gen as any).return(undefined)
@@ -228,16 +249,16 @@ const extractFinalEffector = function (gen: Generator<AnyEff, any>) {
     return finalEffector
 }
 
-const mergeFinalEffectors = function* (childFinalEffector: FinalEffector, parentFinalEffector: FinalEffector): Generator<AnyEff, void> {
-    const childFinalGen = typeof childFinalEffector === 'function' ? childFinalEffector() : childFinalEffector
-    yield* childFinalGen
+const serializeEffectors = function* (first: FinalEffector, second: FinalEffector): Generator<AnyEff, void> {
+    const firstGen = runEffector(first)
+    yield* firstGen
 
-    const parentFinalGen = typeof parentFinalEffector === 'function' ? parentFinalEffector() : parentFinalEffector
-    yield* parentFinalGen
+    const secondGen = runEffector(second)
+    yield* secondGen
 }
 
 export function runSync<E extends AnyOpt | Final, Return>(input: Effector<E, Return>): Return {
-    const gen = typeof input === 'function' ? input() : input
+    const gen = runEffector(input)
     let result = gen.next()
 
     while (!result.done) {
@@ -257,8 +278,15 @@ export type RunAsyncOptions = {
     abortSignal?: AbortSignal
 }
 
-export async function runAsync<E extends Async | AnyOpt | Final, Return>(input: Effector<E, Return>, options?: RunAsyncOptions): Promise<Return> {
-    const gen = typeof input === 'function' ? input() : input
+export async function runAsync<E extends Async | AnyOpt | Final, Return>(
+    effector: Effector<E, Return>,
+    options?: RunAsyncOptions,
+): Promise<Return> {
+    if (options?.abortSignal?.aborted) {
+        throw new Error('[Koka.runAsync]Operation aborted')
+    }
+
+    const gen = runEffector(effector)
     const { promise, resolve, reject } = withResolvers<Return>()
 
     const process = (result: IteratorResult<Async | AnyOpt | Final, Return>): MaybePromise<Return> => {
@@ -285,12 +313,16 @@ export async function runAsync<E extends Async | AnyOpt | Final, Return>(input: 
 
     const abortController = options?.abortSignal ? new AbortController() : undefined
 
-    options?.abortSignal?.addEventListener('abort', () => {
-        reject(new Error('[Koka.runAsync]Operation aborted'))
-    }, {
-        once: true,
-        signal: abortController?.signal,
-    })
+    options?.abortSignal?.addEventListener(
+        'abort',
+        () => {
+            reject(new Error('[Koka.runAsync]Operation aborted'))
+        },
+        {
+            once: true,
+            signal: abortController?.signal,
+        },
+    )
 
     try {
         const value = process(gen.next())
@@ -324,8 +356,8 @@ export type ExtractEffFromTuple<Gens> = Gens extends []
     ? never
     : Gens extends [infer Head, ...infer Tail]
     ? Head extends Effector<infer Yield, any>
-    ? Yield | ExtractEffFromTuple<Tail>
-    : never
+        ? Yield | ExtractEffFromTuple<Tail>
+        : never
     : never
 
 export type ExtractEff<Gens> = Gens extends unknown[]
@@ -338,8 +370,8 @@ export type ExtractReturnFromTuple<Gens> = Gens extends []
     ? []
     : Gens extends [infer Head, ...infer Tail]
     ? Head extends Effector<any, infer R>
-    ? [R, ...ExtractReturnFromTuple<Tail>]
-    : [Head, ...ExtractReturnFromTuple<Tail>]
+        ? [R, ...ExtractReturnFromTuple<Tail>]
+        : [Head, ...ExtractReturnFromTuple<Tail>]
     : never
 
 export type ExtractReturnFromObject<Gens extends object> = {
@@ -350,6 +382,6 @@ export type ExtractReturn<Gens> = Gens extends unknown[]
     ? ExtractReturnFromTuple<Gens>
     : Gens extends object
     ? {
-        [key in keyof ExtractReturnFromObject<Gens>]: ExtractReturnFromObject<Gens>[key]
-    }
+          [key in keyof ExtractReturnFromObject<Gens>]: ExtractReturnFromObject<Gens>[key]
+      }
     : never

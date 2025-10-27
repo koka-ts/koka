@@ -1,13 +1,13 @@
-import * as Koka from '../src/koka'
-import * as Result from '../src/result'
-import * as Err from '../src/err'
-import * as Ctx from '../src/ctx'
-import * as Opt from '../src/opt'
-import * as Async from '../src/async'
+import * as Koka from '../src/koka.ts'
+import * as Result from '../src/result.ts'
+import * as Err from '../src/err.ts'
+import * as Ctx from '../src/ctx.ts'
+import * as Opt from '../src/opt.ts'
+import * as Async from '../src/async.ts'
 
 describe('Err.throw', () => {
     it('should throw error effect', () => {
-        class TestError extends Err.Err('TestError')<string> { }
+        class TestError extends Err.Err('TestError')<string> {}
 
         function* test() {
             yield* Err.throw(new TestError('error message'))
@@ -37,7 +37,7 @@ describe('Koka.try', () => {
     })
 
     it('should catch error effect', () => {
-        class TestError extends Err.Err('TestError')<string> { }
+        class TestError extends Err.Err('TestError')<string> {}
 
         function* test() {
             yield* Err.throw(new TestError('error'))
@@ -53,7 +53,7 @@ describe('Koka.try', () => {
     })
 
     it('should propagate unhandled error', () => {
-        class UnhandledError extends Err.Err('UnhandledError')<string> { }
+        class UnhandledError extends Err.Err('UnhandledError')<string> {}
 
         function* test() {
             yield* Err.throw(new UnhandledError('error'))
@@ -74,9 +74,9 @@ describe('Koka.try', () => {
     })
 
     it('should handle multiple catches', () => {
-        class TestCtx extends Ctx.Ctx('TestCtx')<() => 1> { }
-        class FirstError extends Err.Err('FirstError')<string> { }
-        class SecondError extends Err.Err('SecondError')<string> { }
+        class TestCtx extends Ctx.Ctx('TestCtx')<() => 1> {}
+        class FirstError extends Err.Err('FirstError')<string> {}
+        class SecondError extends Err.Err('SecondError')<string> {}
 
         function* test() {
             yield* Ctx.get(TestCtx)
@@ -96,7 +96,7 @@ describe('Koka.try', () => {
     })
 
     it('should handle nested try/catch', () => {
-        class InnerError extends Err.Err('InnerError')<string> { }
+        class InnerError extends Err.Err('InnerError')<string> {}
 
         function* inner() {
             yield* Err.throw(new InnerError('inner error'))
@@ -159,9 +159,9 @@ describe('Koka.runAsync', () => {
     })
 
     it('should throw error when received unexpected effect type', () => {
-        class TestErr extends Err.Err('TestErr')<string> { }
-        class TestCtx extends Ctx.Ctx('TestCtx')<string> { }
-        class TestOpt extends Opt.Opt('TestOpt')<string> { }
+        class TestErr extends Err.Err('TestErr')<string> {}
+        class TestCtx extends Ctx.Ctx('TestCtx')<string> {}
+        class TestOpt extends Opt.Opt('TestOpt')<string> {}
 
         function* testErr(): Generator<TestErr, string> {
             yield* Err.throw(new TestErr('error'))
@@ -231,7 +231,7 @@ describe('Koka.runSync', () => {
     })
 })
 
-describe.only('Finally behavior', () => {
+describe('Finally behavior', () => {
     it('should execute finally block on normal completion', async () => {
         const finalActions: string[] = []
 
@@ -250,7 +250,7 @@ describe.only('Finally behavior', () => {
 
     it('should execute finally block when error is thrown', async () => {
         const finalActions: string[] = []
-        class TestError extends Err.Err('TestError')<string> { }
+        class TestError extends Err.Err('TestError')<string> {}
 
         function* program() {
             return yield* Koka.try(function* () {
@@ -263,8 +263,8 @@ describe.only('Finally behavior', () => {
 
         const result = await Koka.runAsync(
             Koka.try(program()).handle({
-                TestError: (error: string) => `Caught: ${error}`
-            })
+                TestError: (error: string) => `Caught: ${error}`,
+            }),
         )
         expect(result).toBe('Caught: boom')
         expect(finalActions).toEqual(['cleanup'])
@@ -316,7 +316,7 @@ describe.only('Finally behavior', () => {
         function* inner() {
             return yield* Koka.try(function* () {
                 // never resolves
-                yield* Async.await(new Promise(() => { }))
+                yield* Async.await(new Promise(() => {}))
             }).finally(function* () {
                 finalActions.push('inner cleanup')
             })
@@ -344,7 +344,7 @@ describe.only('Finally behavior', () => {
 
         function* program() {
             return yield* Koka.try(function* () {
-                yield* Async.await(new Promise(() => { })) // Never resolves
+                yield* Async.await(new Promise(() => {})) // Never resolves
                 return undefined
             }).finally(function* () {
                 finalActions.push('cleanup')
@@ -381,7 +381,7 @@ describe.only('Finally behavior', () => {
         function* program() {
             return yield* Koka.try(function* () {
                 // never resolves so we can abort
-                yield* Async.await(new Promise(() => { }))
+                yield* Async.await(new Promise(() => {}))
             }).finally(function* () {
                 yield* Async.await(Promise.resolve())
                 finalActions.push('async cleanup')
@@ -398,7 +398,7 @@ describe.only('Finally behavior', () => {
 
     it('should handle errors in finally block', async () => {
         const actions: string[] = []
-        class CleanupError extends Err.Err('CleanupError')<string> { }
+        class CleanupError extends Err.Err('CleanupError')<string> {}
 
         function* inner() {
             return yield* Koka.try(function* () {
@@ -416,8 +416,8 @@ describe.only('Finally behavior', () => {
                 CleanupError: (msg: string) => {
                     actions.push(`caught: ${msg}`)
                     return 'handled'
-                }
-            })
+                },
+            }),
         )
         expect(result).toBe('handled')
         expect(actions).toEqual(['main', 'cleanup-start', 'caught: cleanup failed'])
@@ -425,13 +425,13 @@ describe.only('Finally behavior', () => {
 
     it('should handle errors in finally block when aborted', async () => {
         const actions: string[] = []
-        class CleanupError extends Err.Err('CleanupError')<string> { }
+        class CleanupError extends Err.Err('CleanupError')<string> {}
 
         function* inner() {
             return yield* Koka.try(function* () {
                 actions.push('main')
                 // never resolves so we can abort
-                yield* Async.await(new Promise(() => { }))
+                yield* Async.await(new Promise(() => {}))
                 return 'done'
             }).finally(function* () {
                 actions.push('cleanup-start')
@@ -446,7 +446,7 @@ describe.only('Finally behavior', () => {
                 CleanupError: (msg: string) => {
                     actions.push(`caught: ${msg}`)
                     return 'handled'
-                }
+                },
             }),
             { abortSignal: controller.signal },
         )
@@ -459,7 +459,7 @@ describe.only('Finally behavior', () => {
 
     it('should handle options in finally block', async () => {
         const actions: string[] = []
-        class CleanupOpt extends Opt.Opt('CleanupOpt')<string> { }
+        class CleanupOpt extends Opt.Opt('CleanupOpt')<string> {}
 
         function* program() {
             return yield* Koka.try(function* () {
@@ -471,30 +471,28 @@ describe.only('Finally behavior', () => {
             })
         }
 
-        const result = await Koka.runAsync(Koka.try(program).handle({
-            [CleanupOpt.field]: 'custom-cleanup'
-        }))
+        const result = await Koka.runAsync(
+            Koka.try(program).handle({
+                [CleanupOpt.field]: 'custom-cleanup',
+            }),
+        )
         expect(result).toBe('done')
         expect(actions).toEqual(['main', 'cleanup: custom-cleanup'])
 
         const result2 = await Koka.runAsync(Koka.try(program).handle({}))
         expect(result2).toBe('done')
-        expect(actions).toEqual([
-            'main', 'cleanup: custom-cleanup',
-            'main', 'cleanup: default'
-        ])
-
+        expect(actions).toEqual(['main', 'cleanup: custom-cleanup', 'main', 'cleanup: default'])
     })
 
-    it.only('should handle options in finally block when aborted', async () => {
+    it('should handle options in finally block when aborted', async () => {
         const actions: string[] = []
-        class CleanupOpt extends Opt.Opt('CleanupOpt')<string> { }
+        class CleanupOpt extends Opt.Opt('CleanupOpt')<string> {}
 
         function* program() {
             return yield* Koka.try(function* () {
                 actions.push('main')
                 // never resolves
-                yield* Async.await(new Promise(() => { }))
+                yield* Async.await(new Promise(() => {}))
                 return 'done'
             }).finally(function* () {
                 const cleanupMode = yield* Opt.get(CleanupOpt)
@@ -505,7 +503,7 @@ describe.only('Finally behavior', () => {
         const controller = new AbortController()
         const promise = Koka.runAsync(
             Koka.try(program).handle({
-                [CleanupOpt.field]: 'custom-cleanup'
+                [CleanupOpt.field]: 'custom-cleanup',
             }),
             { abortSignal: controller.signal },
         )
@@ -518,9 +516,9 @@ describe.only('Finally behavior', () => {
 
     it('should handle mixed effects in finally block', async () => {
         const actions: string[] = []
-        class LogCtx extends Ctx.Ctx('LogCtx')<(msg: string) => void> { }
-        class CleanupError extends Err.Err('CleanupError')<string> { }
-        class CleanupOpt extends Opt.Opt('CleanupOpt')<string> { }
+        class LogCtx extends Ctx.Ctx('LogCtx')<(msg: string) => void> {}
+        class CleanupError extends Err.Err('CleanupError')<string> {}
+        class CleanupOpt extends Opt.Opt('CleanupOpt')<string> {}
 
         function* program() {
             return yield* Koka.try(function* () {
@@ -547,32 +545,30 @@ describe.only('Finally behavior', () => {
             })
         }
 
-        const result = await Koka.runAsync(Koka.try(program).handle({
-            [LogCtx.field]: (msg: string) => actions.push(msg),
-            [CleanupOpt.field]: 'thorough',
-            CleanupError: (err: string) => {
-                actions.push(`error: ${err}`)
-                return 'handled'
-            }
-        }))
+        const result = await Koka.runAsync(
+            Koka.try(program).handle({
+                [LogCtx.field]: (msg: string) => actions.push(msg),
+                [CleanupOpt.field]: 'thorough',
+                CleanupError: (err: string) => {
+                    actions.push(`error: ${err}`)
+                    return 'handled'
+                },
+            }),
+        )
 
         expect(result).toBe('handled')
-        expect(actions).toEqual([
-            'main',
-            'cleanup-start',
-            'thorough cleanup',
-            'error: thorough cleanup failed',
-        ])
+        expect(actions).toEqual(['main', 'cleanup-start', 'thorough cleanup', 'error: thorough cleanup failed'])
 
-
-        const result2 = await Koka.runAsync(Koka.try(program).handle({
-            [LogCtx.field]: (msg: string) => actions.push(msg),
-            [CleanupOpt.field]: 'light',
-            CleanupError: (err: string) => {
-                actions.push(`error: ${err}`)
-                return 'handled'
-            }
-        }))
+        const result2 = await Koka.runAsync(
+            Koka.try(program).handle({
+                [LogCtx.field]: (msg: string) => actions.push(msg),
+                [CleanupOpt.field]: 'light',
+                CleanupError: (err: string) => {
+                    actions.push(`error: ${err}`)
+                    return 'handled'
+                },
+            }),
+        )
         expect(result2).toBe('done')
         expect(actions).toEqual([
             'main',
@@ -586,10 +582,9 @@ describe.only('Finally behavior', () => {
     })
 })
 
-
 describe('Complex scenarios', () => {
     it('should handle successful nested effects', async () => {
-        class TestCtx extends Ctx.Ctx('TestCtx')<number> { }
+        class TestCtx extends Ctx.Ctx('TestCtx')<number> {}
 
         function* program() {
             const ctxValue = yield* Ctx.get(TestCtx)
@@ -606,8 +601,8 @@ describe('Complex scenarios', () => {
     })
 
     it('should handle error in nested effects', async () => {
-        class TestCtx extends Ctx.Ctx('TestCtx')<number> { }
-        class ZeroError extends Err.Err('ZeroError')<string> { }
+        class TestCtx extends Ctx.Ctx('TestCtx')<number> {}
+        class ZeroError extends Err.Err('ZeroError')<string> {}
 
         function* program() {
             const ctxValue = yield* Ctx.get(TestCtx)
@@ -629,17 +624,188 @@ describe('Complex scenarios', () => {
     })
 })
 
+describe('runAsync abort signal edge cases', () => {
+    it('should handle already aborted signal', async () => {
+        const controller = new AbortController()
+        controller.abort()
+
+        function* test() {
+            yield* Async.await(Promise.resolve(42))
+            return 'should not reach here'
+        }
+
+        await expect(Koka.runAsync(test(), { abortSignal: controller.signal })).rejects.toThrow(
+            '[Koka.runAsync]Operation aborted',
+        )
+    })
+
+    it('should handle multiple abort calls', async () => {
+        const controller = new AbortController()
+
+        function* test() {
+            yield* Async.await(new Promise(() => {})) // never resolves
+            return 'should not reach here'
+        }
+
+        const promise = Koka.runAsync(test(), { abortSignal: controller.signal })
+
+        // Multiple abort calls should not cause issues
+        controller.abort()
+        controller.abort()
+        controller.abort()
+
+        await expect(promise).rejects.toThrow('[Koka.runAsync]Operation aborted')
+    })
+
+    it('should handle invalid abort signal', async () => {
+        function* test() {
+            yield* Async.await(Promise.resolve(42))
+            return 'success'
+        }
+
+        // Test with undefined abortSignal
+        const result = await Koka.runAsync(test(), { abortSignal: undefined })
+        expect(result).toBe('success')
+
+        // Test with null abortSignal (should be handled gracefully)
+        const result2 = await Koka.runAsync(test(), { abortSignal: null as any })
+        expect(result2).toBe('success')
+    })
+
+    it('should handle mixed effects with abort', async () => {
+        class TestCtx extends Ctx.Ctx('TestCtx')<string> {}
+        class TestOpt extends Opt.Opt('TestOpt')<string> {}
+
+        function* test() {
+            const ctx = yield* Ctx.get(TestCtx)
+            const opt = yield* Opt.get(TestOpt)
+            yield* Async.await(new Promise(() => {})) // never resolves
+            return `${ctx}-${opt}`
+        }
+
+        const controller = new AbortController()
+        const promise = Koka.runAsync(
+            Koka.try(test()).handle({
+                TestCtx: 'context',
+                TestOpt: 'option',
+            }),
+            { abortSignal: controller.signal },
+        )
+
+        controller.abort()
+        await expect(promise).rejects.toThrow('[Koka.runAsync]Operation aborted')
+    })
+})
+
+describe('runSync edge cases', () => {
+    it('should throw for unexpected effects in runSync', () => {
+        function* testWithErr() {
+            yield { type: 'err', name: 'TestError', error: 'test' } as any
+            return 'should not reach here'
+        }
+
+        expect(() => Koka.runSync(testWithErr())).toThrow('[Koka.runSync]Unexpected effect')
+    })
+
+    it('should throw for Async effects in runSync', () => {
+        function* testWithAsync() {
+            yield { type: 'async', promise: Promise.resolve(42) } as any
+            return 'should not reach here'
+        }
+
+        expect(() => Koka.runSync(testWithAsync())).toThrow('[Koka.runSync]Unexpected effect')
+    })
+
+    it('should handle Ctx effects in runSync', () => {
+        class TestCtx extends Ctx.Ctx('TestCtx')<string> {}
+
+        function* testWithCtx() {
+            const ctx = yield* Ctx.get(TestCtx)
+            return ctx
+        }
+
+        const result = Koka.runSync(
+            Koka.try(testWithCtx()).handle({
+                TestCtx: 'test value',
+            }),
+        )
+        expect(result).toBe('test value')
+    })
+})
+
+describe('Type extraction utilities', () => {
+    it('should extract effects from tuple', () => {
+        class TestErr extends Err.Err('TestErr')<string> {}
+        class TestCtx extends Ctx.Ctx('TestCtx')<number> {}
+
+        function* effect1(): Generator<TestErr, string> {
+            yield* Err.throw(new TestErr('error'))
+            return 'result1'
+        }
+
+        function* effect2(): Generator<TestCtx, number> {
+            const ctx = yield* Ctx.get(TestCtx)
+            return ctx
+        }
+
+        // Test ExtractEff type
+        type ExtractedEff = Koka.ExtractEff<[typeof effect1, typeof effect2]>
+        const _testEff: ExtractedEff = {} as TestErr | TestCtx
+
+        // Test ExtractReturn type
+        type ExtractedReturn = Koka.ExtractReturn<[typeof effect1, typeof effect2]>
+        const _testReturn: ExtractedReturn = ['result1', 42] as const
+
+        expect(true).toBe(true) // Type test passes if compilation succeeds
+    })
+
+    it('should extract effects from object', () => {
+        class TestErr extends Err.Err('TestErr')<string> {}
+        class TestCtx extends Ctx.Ctx('TestCtx')<number> {}
+
+        function* effect1(): Generator<TestErr, string> {
+            yield* Err.throw(new TestErr('error'))
+            return 'result1'
+        }
+
+        function* effect2(): Generator<TestCtx, number> {
+            const ctx = yield* Ctx.get(TestCtx)
+            return ctx
+        }
+
+        const effects = {
+            errorEffect: effect1,
+            contextEffect: effect2,
+            plainValue: 'test',
+        }
+
+        // Test ExtractEff type
+        type ExtractedEff = Koka.ExtractEff<typeof effects>
+        const _testEff: ExtractedEff = {} as TestErr | TestCtx
+
+        // Test ExtractReturn type
+        type ExtractedReturn = Koka.ExtractReturn<typeof effects>
+        const _testReturn: ExtractedReturn = {
+            errorEffect: 'result1',
+            contextEffect: 42,
+            plainValue: 'test',
+        }
+
+        expect(true).toBe(true) // Type test passes if compilation succeeds
+    })
+})
+
 describe('design first approach', () => {
     // predefined error effects
-    class UserNotFound extends Err.Err('UserNotFound')<string> { }
-    class UserInvalid extends Err.Err('UserInvalid')<{ reason: string }> { }
+    class UserNotFound extends Err.Err('UserNotFound')<string> {}
+    class UserInvalid extends Err.Err('UserInvalid')<{ reason: string }> {}
 
     // predefined context effects
-    class AuthToken extends Ctx.Ctx('AuthToken')<string> { }
-    class UserId extends Ctx.Ctx('UserId')<string> { }
+    class AuthToken extends Ctx.Ctx('AuthToken')<string> {}
+    class UserId extends Ctx.Ctx('UserId')<string> {}
 
     // predefined option effects
-    class LoggerOpt extends Opt.Opt('Logger')<(message: string) => void> { }
+    class LoggerOpt extends Opt.Opt('Logger')<(message: string) => void> {}
 
     // Helper functions using the defined types
     function* requireUserId() {
