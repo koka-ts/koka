@@ -519,7 +519,7 @@ export function query() {
             this[methodName].store = this.store
         })
 
-        function* replacementMethod(this: This): Generator<Yield | QueryOpt, Return> {
+        function* replacementMethod(this: This): Generator<Yield | QueryOpt | Koka.Final, Return> {
             const domainName = (this as any).constructor?.name ?? 'UnknownDomain'
             const parentQueryTree: QueryExecutionTree | undefined = yield* Opt.get(QueryTracerOpt)
 
@@ -732,10 +732,12 @@ export function command() {
                 eventTree.commands.push(commandTree)
             }
 
-            const gen = Koka.try(Result.wrap(target.call(this, ...args))).handle({
-                [CommandTracerOpt.field]: commandTree,
-                [QueryTracerOpt.field]: queryTree,
-            } as any)
+            const gen = Koka.try(Result.wrap(target.call(this, ...args)))
+                .handle({
+                    [CommandTracerOpt.field]: commandTree,
+                    [QueryTracerOpt.field]: queryTree,
+                } as any)
+                [Symbol.iterator]()
 
             let iteratorResult = gen.next()
 

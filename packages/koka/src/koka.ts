@@ -113,16 +113,7 @@ class HandledPhase<Yield extends AnyEff, Return, Handlers extends Partial<Effect
                     const errorHandler = handlers[effect.name as keyof Handlers]
 
                     if (typeof errorHandler === 'function') {
-                        const finalEffector = extractFinalEffector(gen)
-                        if (finalEffector) {
-                            const finalEffectorGen = runEffector(finalEffector)
-                            /**
-                             * If there is an error handler, we need to first run the final effectors before calling the error handler
-                             * This ensures that any cleanup or finalization logic is executed, because the err effect will not be resumed
-                             */
-                            yield* finalEffectorGen as Generator<any, void>
-                        }
-
+                        status = 'thrown'
                         return errorHandler(effect.error)
                     } else {
                         result = gen.next(yield effect as any)
@@ -149,21 +140,33 @@ class HandledPhase<Yield extends AnyEff, Return, Handlers extends Partial<Effect
             status = 'returned'
             return result.value
         } catch (error) {
-            const finalEffector = extractFinalEffector(gen)
-            if (finalEffector) {
-                const finalGen = runEffector(new TryPhase(finalEffector).handle(this.handlers))
-                yield* finalGen as Generator<any, void>
-            }
             status = 'thrown'
             throw error
         } finally {
-            const finalEffector = status === 'running' ? extractFinalEffector(gen) : undefined
+            const finalEffector = extractFinalEffector(gen)
 
             if (finalEffector) {
-                yield {
-                    type: 'final',
-                    effector: new TryPhase(finalEffector).handle(this.handlers),
-                } as Final
+                const finalHandledEffector = new TryPhase(finalEffector).handle(this.handlers)
+                if (status === 'thrown') {
+                    /**
+                     * normal control flow, so we just run the final effectors
+                     */
+                    const finalGen = runEffector(finalHandledEffector)
+                    yield* finalGen as Generator<any, void>
+                } else if (status === 'running') {
+                    /**
+                     * trigger from gen.return(undefined) that can only yield once with Final effect
+                     */
+                    yield {
+                        type: 'final',
+                        effector: finalHandledEffector,
+                    } as Final
+                } else {
+                    /**
+                     * when status is 'returned', it means gen should not yield again, so we throw an error
+                     */
+                    throw new Error(`[Koka]Unexpected status: ${status}`)
+                }
             }
         }
     }
@@ -228,7 +231,7 @@ function tryEffect<Yield extends AnyEff, Return>(effector: Effector<Yield, Retur
 
 export { tryEffect as try }
 
-const extractFinalEffector = function (gen: Generator<AnyEff, any>) {
+export const extractFinalEffector = function (gen: Generator<AnyEff, any>) {
     let finalEffector: FinalEffector | undefined
     let result = (gen as any).return(undefined)
 

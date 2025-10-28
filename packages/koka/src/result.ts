@@ -1,7 +1,6 @@
 import type * as Async from './async.ts'
 import type * as Err from './err.ts'
 import type * as Opt from './opt.ts'
-import * as Gen from './gen.ts'
 import * as Koka from './koka.ts'
 
 export type Ok<T> = {
@@ -34,8 +33,9 @@ export type InferOkValue<T> = T extends Ok<infer U> ? U : never
 
 export function* wrap<Return, Yield extends Koka.AnyEff = never>(
     effector: Koka.Effector<Yield, Return>,
-): Generator<Err.ExcludeErr<Yield>, Ok<Return> | Err.ExtractErr<Yield>> {
+): Generator<Err.ExcludeErr<Yield> | Koka.Final, Ok<Return> | Err.ExtractErr<Yield>> {
     const gen = Koka.runEffector(effector)
+    let status: 'running' | 'returned' | 'thrown' = 'running'
     try {
         let result = gen.next()
 
@@ -43,18 +43,30 @@ export function* wrap<Return, Yield extends Koka.AnyEff = never>(
             const effect = result.value
 
             if (effect.type === 'err') {
+                status = 'thrown'
                 return effect as Err.ExtractErr<Yield>
             } else {
                 result = gen.next(yield effect as any)
             }
         }
 
+        status = 'returned'
         return {
             type: 'ok',
             value: result.value,
         }
+    } catch (error) {
+        status = 'thrown'
+        throw error
     } finally {
-        Gen.cleanUpGen(gen)
+        const finalEffector = Koka.extractFinalEffector(gen)
+        if (finalEffector) {
+            if (status === 'running') {
+                yield { type: 'final', effector: finalEffector }
+            } else {
+                yield* Koka.runEffector(finalEffector) as Generator<Koka.Final, void>
+            }
+        }
     }
 }
 
@@ -78,13 +90,12 @@ export function* unwrap<Return extends AnyOk | Err.AnyErr, Yield>(
 export function runSync<E extends Err.AnyErr | Opt.AnyOpt | Koka.Final, Return>(
     effector: Koka.Effector<E, Return>,
 ): Ok<Return> | Err.ExtractErr<E> {
-    const gen = Koka.runEffector(effector)
-    return Koka.runSync(wrap(gen as any) as any)
+    return Koka.runSync(wrap(effector) as any)
 }
 
 export function runAsync<E extends Err.AnyErr | Opt.AnyOpt | Async.Async | Koka.Final, Return>(
     effector: Koka.Effector<E, Return>,
+    options?: Koka.RunAsyncOptions,
 ): Promise<Ok<Return> | Err.ExtractErr<E>> {
-    const gen = Koka.runEffector(effector)
-    return Koka.runAsync(wrap(gen as any) as any)
+    return Koka.runAsync(wrap(effector) as any, options)
 }
