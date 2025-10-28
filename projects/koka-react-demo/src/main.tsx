@@ -1,44 +1,111 @@
-import { StrictMode } from 'react'
+import { StrictMode, useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import * as Domain from 'koka-domain'
 import { PrettyLogger } from 'koka-domain/pretty-browser-logger'
 import { useDomainState } from 'koka-react'
-import {
-    type TodoApp,
-    TodoAppDomain,
-    type CoreDomain,
-    type TodoStorage,
-    type Todo,
-    type TextLoggerEnhancer,
-} from './domain'
+import { type TodoApp, TodoAppDomain } from './domain'
 import './index.css'
 import App from './App.tsx'
-import './test.ts'
 
 type AppState = {
+    todoApp: TodoApp
     todoAppList: TodoApp[]
 }
 
 type MainProps = {
-    domain: CoreDomain<AppState, AppState>
+    domain: Domain.Domain<AppState, AppState>
 }
 
 function Main(props: MainProps) {
     const count = useDomainState(props.domain.select((app) => app.todoAppList.length))
+    const [mode, setMode] = useState<'todo-app' | 'todo-app-list'>('todo-app')
 
     return (
-        <div className="min-h-screen bg-gradient-to-br from-slate-50 to-blue-50 p-6">
-            <div className="max-w-7xl mx-auto">
-                <div className="flex flex-wrap justify-center gap-8">
-                    {Array.from({ length: count }).map((_, index) => {
-                        const todoApp$ = new TodoAppDomain(props.domain.select((app) => app.todoAppList[index]))
+        <div className="min-h-screen bg-linear-to-br from-slate-50 via-blue-50 to-indigo-100 p-6">
+            {/* Header Section */}
+            <div className="max-w-7xl mx-auto mb-8">
+                <div className="text-center mb-8">
+                    <h1 className="text-4xl md:text-5xl font-bold bg-linear-to-r from-blue-600 via-purple-600 to-indigo-600 bg-clip-text text-transparent mb-4">
+                        Koka Todo Demo
+                    </h1>
+                    <p className="text-gray-600 text-lg max-w-2xl mx-auto">
+                        Experience a modern Todo application built with Koka framework, supporting both single and
+                        multiple Todo list management
+                    </p>
+                </div>
 
-                        return (
-                            <div key={index} className="mb-8">
-                                <App todoApp$={todoApp$} />
-                            </div>
-                        )
-                    })}
+                {/* Mode Toggle Buttons */}
+                <div className="flex justify-center mb-8">
+                    <div className="bg-white/80 backdrop-blur-sm rounded-2xl p-2 shadow-lg border border-white/20">
+                        <button
+                            className={`px-6 py-3 rounded-xl font-semibold transition-all duration-300 transform hover:scale-105 ${
+                                mode === 'todo-app'
+                                    ? 'bg-linear-to-r from-blue-500 to-indigo-600 text-white shadow-lg shadow-blue-500/25'
+                                    : 'text-gray-600 hover:text-blue-600 hover:bg-blue-50'
+                            }`}
+                            onClick={() => setMode('todo-app')}
+                        >
+                            <span className="flex items-center gap-2">
+                                <span className="text-lg">📝</span>
+                                Single Todo
+                            </span>
+                        </button>
+                        <button
+                            className={`px-6 py-3 rounded-xl font-semibold transition-all duration-300 transform hover:scale-105 ${
+                                mode === 'todo-app-list'
+                                    ? 'bg-linear-to-r from-blue-500 to-indigo-600 text-white shadow-lg shadow-blue-500/25'
+                                    : 'text-gray-600 hover:text-blue-600 hover:bg-blue-50'
+                            }`}
+                            onClick={() => setMode('todo-app-list')}
+                        >
+                            <span className="flex items-center gap-2">
+                                <span className="text-lg">📋</span>
+                                Multiple Todos ({count})
+                            </span>
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            {/* Content Section */}
+            <div className="max-w-7xl mx-auto">
+                {mode === 'todo-app-list' ? (
+                    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6 justify-items-center">
+                        {Array.from({ length: count }).map((_, index) => {
+                            const todoApp$ = new TodoAppDomain(props.domain.select((app) => app.todoAppList[index]))
+
+                            return (
+                                <div
+                                    key={index}
+                                    className="w-full max-w-sm transform transition-all duration-300 hover:scale-105 hover:shadow-2xl"
+                                >
+                                    <div className="relative">
+                                        <div className="absolute -top-2 -right-2 bg-linear-to-r from-purple-500 to-pink-500 text-white text-xs font-bold px-2 py-1 rounded-full shadow-lg">
+                                            #{index + 1}
+                                        </div>
+                                        <App todoApp$={todoApp$} />
+                                    </div>
+                                </div>
+                            )
+                        })}
+                    </div>
+                ) : (
+                    <div className="flex justify-center">
+                        <div className="transform transition-all duration-300 hover:scale-105 hover:shadow-2xl">
+                            <App todoApp$={new TodoAppDomain(props.domain.prop('todoApp'))} />
+                        </div>
+                    </div>
+                )}
+            </div>
+
+            {/* Footer */}
+            <div className="max-w-7xl mx-auto mt-12 text-center">
+                <div className="bg-white/60 backdrop-blur-sm rounded-2xl p-6 shadow-lg border border-white/20">
+                    <p className="text-gray-600 text-sm">
+                        🚀 Built with <span className="font-semibold text-blue-600">Koka</span> framework | 💡 Powered
+                        by <span className="font-semibold text-purple-600">React</span> +{' '}
+                        <span className="font-semibold text-cyan-600">Tailwind CSS</span>
+                    </p>
                 </div>
             </div>
         </div>
@@ -46,6 +113,18 @@ function Main(props: MainProps) {
 }
 
 const initialState: AppState = {
+    todoApp: {
+        todos: [
+            { id: 101, text: 'Learn koka-domain framework', done: true },
+            { id: 102, text: 'Build React todo app', done: true },
+            { id: 103, text: 'Write comprehensive documentation', done: false },
+            { id: 104, text: 'Add unit tests', done: false },
+            { id: 105, text: 'Optimize performance', done: false },
+            { id: 106, text: 'Deploy to production', done: false },
+        ],
+        input: '',
+        filter: 'all',
+    },
     todoAppList: [
         {
             todos: [
@@ -109,40 +188,7 @@ const initialState: AppState = {
     ],
 }
 
-export type UseTodoStorageOptions = {
-    todoStorageKey: string
-}
-
-export function useTodoStorage(options: UseTodoStorageOptions): TodoStorage {
-    return {
-        async saveTodoList(todoList: Todo[]): Promise<void> {
-            localStorage.setItem(options.todoStorageKey, JSON.stringify(todoList))
-        },
-        async loadTodoList(): Promise<Todo[]> {
-            return JSON.parse(localStorage.getItem(options.todoStorageKey) || '[]')
-        },
-    }
-}
-
-export const logText: TextLoggerEnhancer['logText'] = (text) => {
-    console.log('[logText]', text)
-}
-
-export interface StoreWithTodoStorageOptions<Root> extends Domain.StoreOptions<Root> {
-    todoStorageKey?: string
-}
-
-export class StoreWithTodoStorage<Root> extends Domain.Store<Root> {
-    todoStorage: TodoStorage
-    constructor(options: StoreWithTodoStorageOptions<Root>) {
-        super(options)
-        this.todoStorage = useTodoStorage({
-            todoStorageKey: options.todoStorageKey ?? 'todoList',
-        })
-    }
-    logText = logText
-}
-const store = new StoreWithTodoStorage<AppState>({
+const store = new Domain.Store<AppState>({
     state: initialState,
     plugins: [PrettyLogger()],
 })

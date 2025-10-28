@@ -3,6 +3,8 @@ import * as Task from '../src/task'
 import * as Result from '../src/result'
 import * as Async from '../src/async'
 import * as Err from '../src/err'
+import * as Ctx from '../src/ctx'
+import * as Opt from '../src/opt'
 
 const delayTime = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
 
@@ -1783,5 +1785,909 @@ describe('Concurrent with cleanup and resource management', () => {
 
         await expect(Result.runAsync(Task.concurrent(inputs, handler))).rejects.toThrow('Handler error')
         expect(cleanupCalls).toEqual([0, 1])
+    })
+})
+
+describe('Task methods with Koka finally behavior', () => {
+    it('should execute finally block on normal completion with Task.all', async () => {
+        const finalActions: string[] = []
+
+        function* task(index: number) {
+            yield* Async.await(delayTime(10))
+            return `task-${index}`
+        }
+
+        function* program() {
+            return yield* Koka.try(Task.all([task(0), task(1), task(2)])).finally(function* () {
+                finalActions.push('cleanup')
+            })
+        }
+
+        const result = await Koka.runAsync(program())
+        expect(result).toEqual(['task-0', 'task-1', 'task-2'])
+        expect(finalActions).toEqual(['cleanup'])
+    })
+
+    it('should execute finally block when error is thrown with Task.all', async () => {
+        const finalActions: string[] = []
+        class TaskError extends Err.Err('TaskError')<string> {}
+
+        function* failingTask() {
+            yield* Err.throw(new TaskError('task failed'))
+            return 'should not reach here'
+        }
+
+        function* program() {
+            return yield* Koka.try(Task.all([failingTask()])).finally(function* () {
+                finalActions.push('cleanup')
+            })
+        }
+
+        const result = await Koka.runAsync(
+            Koka.try(program()).handle({
+                TaskError: (error: string) => `Caught: ${error}`,
+            }),
+        )
+        expect(result).toBe('Caught: task failed')
+        expect(finalActions).toEqual(['cleanup'])
+    })
+
+    it('should execute finally blocks when native exceptions are thrown with Task.all', async () => {
+        const finalActions: string[] = []
+
+        function* program() {
+            yield* Koka.try(
+                Task.all([
+                    function* () {
+                        throw new Error('native error')
+                        return 'should not reach here'
+                    },
+                ]),
+            ).finally(function* () {
+                finalActions.push('cleanup')
+            })
+        }
+
+        const result = Koka.runAsync(program())
+        await expect(result).rejects.toThrow('native error')
+        expect(finalActions).toEqual(['cleanup'])
+    })
+
+    it('should execute finally block on normal completion with Task.race', async () => {
+        const finalActions: string[] = []
+
+        function* fastTask() {
+            return 'fast'
+        }
+
+        function* slowTask() {
+            yield* Async.await(delayTime(100))
+            return 'slow'
+        }
+
+        function* program() {
+            return yield* Koka.try(Task.race([fastTask(), slowTask()])).finally(function* () {
+                finalActions.push('cleanup')
+            })
+        }
+
+        const result = await Koka.runAsync(program())
+        expect(result).toBe('fast')
+        expect(finalActions).toEqual(['cleanup'])
+    })
+
+    it('should execute finally block on normal completion with Task.concurrent', async () => {
+        const finalActions: string[] = []
+
+        function* task(index: number) {
+            yield* Async.await(delayTime(10))
+            return `task-${index}`
+        }
+
+        function* program() {
+            return yield* Koka.try(
+                Task.concurrent([task(0), task(1), task(2)], async (stream) => {
+                    const results = []
+                    for await (const { value } of stream) {
+                        results.push(value)
+                    }
+                    return results
+                }),
+            ).finally(function* () {
+                finalActions.push('cleanup')
+            })
+        }
+
+        const result = await Koka.runAsync(program())
+        expect(result).toEqual(['task-0', 'task-1', 'task-2'])
+        expect(finalActions).toEqual(['cleanup'])
+    })
+
+    it('should execute finally block on normal completion with Task.series', async () => {
+        const finalActions: string[] = []
+
+        function* task(index: number) {
+            yield* Async.await(delayTime(10))
+            return `task-${index}`
+        }
+
+        function* program() {
+            return yield* Koka.try(
+                Task.series([task(0), task(1), task(2)], async (stream) => {
+                    const results = []
+                    for await (const { value } of stream) {
+                        results.push(value)
+                    }
+                    return results
+                }),
+            ).finally(function* () {
+                finalActions.push('cleanup')
+            })
+        }
+
+        const result = await Koka.runAsync(program())
+        expect(result).toEqual(['task-0', 'task-1', 'task-2'])
+        expect(finalActions).toEqual(['cleanup'])
+    })
+
+    it('should execute finally block on normal completion with Task.parallel', async () => {
+        const finalActions: string[] = []
+
+        function* task(index: number) {
+            yield* Async.await(delayTime(10))
+            return `task-${index}`
+        }
+
+        function* program() {
+            return yield* Koka.try(
+                Task.parallel([task(0), task(1), task(2)], async (stream) => {
+                    const results = []
+                    for await (const { value } of stream) {
+                        results.push(value)
+                    }
+                    return results
+                }),
+            ).finally(function* () {
+                finalActions.push('cleanup')
+            })
+        }
+
+        const result = await Koka.runAsync(program())
+        expect(result).toEqual(['task-0', 'task-1', 'task-2'])
+        expect(finalActions).toEqual(['cleanup'])
+    })
+
+    it('should execute nested finally blocks in reverse order with Task.all', async () => {
+        const finalActions: string[] = []
+
+        function* inner() {
+            return yield* Koka.try(
+                Task.all([
+                    function* () {
+                        return 'inner'
+                    },
+                ]),
+            ).finally(function* () {
+                finalActions.push('inner cleanup')
+            })
+        }
+
+        function* outer() {
+            return yield* Koka.try(inner()).finally(function* () {
+                finalActions.push('outer cleanup')
+            })
+        }
+
+        const result = await Koka.runAsync(outer())
+        expect(result).toEqual(['inner'])
+        expect(finalActions).toEqual(['inner cleanup', 'outer cleanup'])
+    })
+
+    it('should execute finally when aborted with Task.all', async () => {
+        const finalActions: string[] = []
+        const controller = new AbortController()
+
+        function* program() {
+            return yield* Koka.try(
+                Task.all([
+                    function* () {
+                        yield* Async.await(new Promise(() => {})) // Never resolves
+                        return 'should not reach here'
+                    },
+                ]),
+            ).finally(function* () {
+                finalActions.push('cleanup')
+            })
+        }
+
+        const promise = Koka.runAsync(program(), { abortSignal: controller.signal })
+        controller.abort()
+
+        await expect(promise).rejects.toThrow('Operation aborted')
+        expect(finalActions).toEqual(['cleanup'])
+    })
+
+    it('should execute finally with async operations with Task.all', async () => {
+        const finalActions: string[] = []
+
+        function* program() {
+            return yield* Koka.try(
+                Task.all([
+                    function* () {
+                        return yield* Async.await(Promise.resolve(42))
+                    },
+                ]),
+            ).finally(function* () {
+                yield* Async.await(Promise.resolve())
+                finalActions.push('async cleanup')
+            })
+        }
+
+        const result = await Koka.runAsync(program())
+        expect(result).toEqual([42])
+        expect(finalActions).toEqual(['async cleanup'])
+    })
+
+    it('should handle errors in finally block with Task.all', async () => {
+        const actions: string[] = []
+        class CleanupError extends Err.Err('CleanupError')<string> {}
+
+        function* inner() {
+            return yield* Koka.try(
+                Task.all([
+                    function* () {
+                        actions.push('main')
+                        return 'done'
+                    },
+                ]),
+            ).finally(function* () {
+                actions.push('cleanup-start')
+                yield* Err.throw(new CleanupError('cleanup failed'))
+                actions.push('cleanup-end') // Should not reach here
+            })
+        }
+
+        const result = await Koka.runAsync(
+            Koka.try(inner()).handle({
+                CleanupError: (msg: string) => {
+                    actions.push(`caught: ${msg}`)
+                    return 'handled'
+                },
+            }),
+        )
+        expect(result).toBe('handled')
+        expect(actions).toEqual(['main', 'cleanup-start', 'caught: cleanup failed'])
+    })
+
+    it('should handle options in finally block with Task.all', async () => {
+        const actions: string[] = []
+        class CleanupOpt extends Opt.Opt('CleanupOpt')<string> {}
+
+        function* program() {
+            return yield* Koka.try(
+                Task.all([
+                    function* () {
+                        actions.push('main')
+                        return 'done'
+                    },
+                ]),
+            ).finally(function* () {
+                const cleanupMode = yield* Opt.get(CleanupOpt)
+                actions.push(`cleanup: ${cleanupMode ?? 'default'}`)
+            })
+        }
+
+        const result = await Koka.runAsync(
+            Koka.try(program).handle({
+                CleanupOpt: 'custom-cleanup',
+            }),
+        )
+        expect(result).toEqual(['done'])
+        expect(actions).toEqual(['main', 'cleanup: custom-cleanup'])
+
+        const result2 = await Koka.runAsync(Koka.try(program).handle({}))
+        expect(result2).toEqual(['done'])
+        expect(actions).toEqual(['main', 'cleanup: custom-cleanup', 'main', 'cleanup: default'])
+    })
+
+    it('should handle mixed effects in finally block with Task.all', async () => {
+        const actions: string[] = []
+        class LogCtx extends Ctx.Ctx('LogCtx')<(msg: string) => void> {}
+        class CleanupError extends Err.Err('CleanupError')<string> {}
+        class CleanupOpt extends Opt.Opt('CleanupOpt')<string> {}
+
+        function* program() {
+            return yield* Koka.try(
+                Task.all([
+                    function* () {
+                        const log = yield* Ctx.get(LogCtx)
+                        log('main')
+                        return 'done'
+                    },
+                ]),
+            ).finally(function* () {
+                // Use context
+                const log = yield* Ctx.get(LogCtx)
+                log('cleanup-start')
+
+                // Use option
+                const mode = yield* Opt.get(CleanupOpt)
+                if (mode === 'thorough') {
+                    // Use async
+                    yield* Async.await(Promise.resolve())
+                    actions.push('thorough cleanup')
+
+                    // Use error
+                    yield* Err.throw(new CleanupError('thorough cleanup failed'))
+                }
+
+                log('cleanup-end')
+            })
+        }
+
+        const result = await Koka.runAsync(
+            Koka.try(program).handle({
+                LogCtx: (msg: string) => actions.push(msg),
+                CleanupOpt: 'thorough',
+                CleanupError: (err: string) => {
+                    actions.push(`error: ${err}`)
+                    return 'handled'
+                },
+            }),
+        )
+
+        expect(result).toBe('handled')
+        expect(actions).toEqual(['main', 'cleanup-start', 'thorough cleanup', 'error: thorough cleanup failed'])
+
+        const result2 = await Koka.runAsync(
+            Koka.try(program).handle({
+                LogCtx: (msg: string) => actions.push(msg),
+                CleanupOpt: 'light',
+                CleanupError: (err: string) => {
+                    actions.push(`error: ${err}`)
+                    return 'handled'
+                },
+            }),
+        )
+        expect(result2).toEqual(['done'])
+        expect(actions).toEqual([
+            'main',
+            'cleanup-start',
+            'thorough cleanup',
+            'error: thorough cleanup failed',
+            'main',
+            'cleanup-start',
+            'cleanup-end',
+        ])
+    })
+
+    it('should handle TaskProducer with finally with Task.all', async () => {
+        const finalActions: string[] = []
+
+        const producer = (index: number) => {
+            if (index < 3) {
+                return function* () {
+                    yield* Async.await(delayTime(10))
+                    return `task-${index}`
+                }
+            }
+            return undefined
+        }
+
+        function* program() {
+            return yield* Koka.try(Task.all(producer)).finally(function* () {
+                finalActions.push('cleanup')
+            })
+        }
+
+        const result = await Koka.runAsync(program())
+        expect(result).toEqual(['task-0', 'task-1', 'task-2'])
+        expect(finalActions).toEqual(['cleanup'])
+    })
+
+    it('should handle early termination in Task.concurrent with finally', async () => {
+        const finalActions: string[] = []
+
+        function* task(index: number) {
+            yield* Async.await(delayTime(20))
+            return `task-${index}`
+        }
+
+        function* program() {
+            return yield* Koka.try(
+                Task.concurrent([task(0), task(1), task(2)], async (stream) => {
+                    const results = []
+                    for await (const { value } of stream) {
+                        results.push(value)
+                        if (results.length === 2) {
+                            return results // Early termination
+                        }
+                    }
+                    return results
+                }),
+            ).finally(function* () {
+                finalActions.push('cleanup')
+            })
+        }
+
+        const result = await Koka.runAsync(program())
+        expect(result).toEqual(['task-0', 'task-1'])
+        expect(finalActions).toEqual(['cleanup'])
+    })
+
+    it('should handle maxConcurrency with finally with Task.concurrent', async () => {
+        const finalActions: string[] = []
+
+        function* task(index: number) {
+            yield* Async.await(delayTime(20))
+            return `task-${index}`
+        }
+
+        function* program() {
+            return yield* Koka.try(
+                Task.concurrent(
+                    [task(0), task(1), task(2), task(3)],
+                    async (stream) => {
+                        const results = []
+                        for await (const { value } of stream) {
+                            results.push(value)
+                        }
+                        return results
+                    },
+                    { maxConcurrency: 2 },
+                ),
+            ).finally(function* () {
+                finalActions.push('cleanup')
+            })
+        }
+
+        const result = await Koka.runAsync(program())
+        expect(result).toEqual(['task-0', 'task-1', 'task-2', 'task-3'])
+        expect(finalActions).toEqual(['cleanup'])
+    })
+
+    it('should handle complex nested scenarios with Task methods and finally', async () => {
+        const cleanupActions: string[] = []
+
+        function* complexTaskWithFinally(index: number) {
+            try {
+                return yield* Koka.try(function* () {
+                    const innerResult = yield* Task.all([
+                        function* () {
+                            yield* Async.await(delayTime(5))
+                            return `inner-${index}-0`
+                        },
+                        function* () {
+                            yield* Async.await(delayTime(5))
+                            return `inner-${index}-1`
+                        },
+                    ])
+                    return innerResult
+                }).finally(function* () {
+                    cleanupActions.push(`middle-cleanup-${index}`)
+                })
+            } finally {
+                cleanupActions.push(`outer-cleanup-${index}`)
+            }
+        }
+
+        function* program() {
+            return yield* Koka.try(Task.all([complexTaskWithFinally(0), complexTaskWithFinally(1)])).finally(
+                function* () {
+                    cleanupActions.push('final-cleanup')
+                },
+            )
+        }
+
+        const result = await Koka.runAsync(program())
+        expect(result).toEqual([
+            ['inner-0-0', 'inner-0-1'],
+            ['inner-1-0', 'inner-1-1'],
+        ])
+        expect(cleanupActions).toEqual([
+            'middle-cleanup-0',
+            'outer-cleanup-0',
+            'middle-cleanup-1',
+            'outer-cleanup-1',
+            'final-cleanup',
+        ])
+    })
+
+    it('should execute finally block after all sub-tasks complete with Task.all', async () => {
+        const executionOrder: string[] = []
+
+        function* subTask(index: number) {
+            executionOrder.push(`sub-task-${index}-start`)
+            yield* Async.await(delayTime(20))
+            executionOrder.push(`sub-task-${index}-end`)
+            return `task-${index}`
+        }
+
+        function* program() {
+            return yield* Koka.try(Task.all([subTask(0), subTask(1), subTask(2)])).finally(function* () {
+                executionOrder.push('finally-start')
+                yield* Async.await(delayTime(10))
+                executionOrder.push('finally-end')
+            })
+        }
+
+        const result = await Koka.runAsync(program())
+        expect(result).toEqual(['task-0', 'task-1', 'task-2'])
+
+        // Verify finally executes after all sub-tasks complete
+        expect(executionOrder).toEqual([
+            'sub-task-0-start',
+            'sub-task-1-start',
+            'sub-task-2-start',
+            'sub-task-0-end',
+            'sub-task-1-end',
+            'sub-task-2-end',
+            'finally-start',
+            'finally-end',
+        ])
+    })
+
+    it('should execute finally block after all sub-tasks complete with Task.concurrent', async () => {
+        const executionOrder: string[] = []
+
+        function* subTask(index: number) {
+            executionOrder.push(`sub-task-${index}-start`)
+            yield* Async.await(delayTime(20))
+            executionOrder.push(`sub-task-${index}-end`)
+            return `task-${index}`
+        }
+
+        function* program() {
+            return yield* Koka.try(
+                Task.concurrent([subTask(0), subTask(1), subTask(2)], async (stream) => {
+                    const results = []
+                    for await (const { value } of stream) {
+                        results.push(value)
+                    }
+                    return results
+                }),
+            ).finally(function* () {
+                executionOrder.push('finally-start')
+                yield* Async.await(delayTime(10))
+                executionOrder.push('finally-end')
+            })
+        }
+
+        const result = await Koka.runAsync(program())
+        expect(result).toEqual(['task-0', 'task-1', 'task-2'])
+
+        // Verify finally executes after all sub-tasks complete
+        expect(executionOrder).toEqual([
+            'sub-task-0-start',
+            'sub-task-1-start',
+            'sub-task-2-start',
+            'sub-task-0-end',
+            'sub-task-1-end',
+            'sub-task-2-end',
+            'finally-start',
+            'finally-end',
+        ])
+    })
+
+    it('should execute finally block after race winner completes with Task.race', async () => {
+        const executionOrder: string[] = []
+
+        function* fastTask() {
+            executionOrder.push('fast-task-start')
+            yield* Async.await(delayTime(10))
+            executionOrder.push('fast-task-end')
+            return 'fast'
+        }
+
+        function* slowTask() {
+            executionOrder.push('slow-task-start')
+            yield* Async.await(delayTime(50))
+            executionOrder.push('slow-task-end')
+            return 'slow'
+        }
+
+        function* program() {
+            return yield* Koka.try(Task.race([fastTask(), slowTask()])).finally(function* () {
+                executionOrder.push('finally-start')
+                yield* Async.await(delayTime(5))
+                executionOrder.push('finally-end')
+            })
+        }
+
+        const result = await Koka.runAsync(program())
+        expect(result).toBe('fast')
+
+        // Verify finally executes after race winner completes
+        expect(executionOrder).toEqual([
+            'fast-task-start',
+            'slow-task-start',
+            'fast-task-end',
+            'finally-start',
+            'finally-end',
+        ])
+    })
+
+    it('should handle sub-task finally and sup-task finally execution order', async () => {
+        const executionOrder: string[] = []
+
+        function* subTaskWithFinally(index: number) {
+            try {
+                executionOrder.push(`sub-task-${index}-start`)
+                yield* Async.await(delayTime(20))
+                executionOrder.push(`sub-task-${index}-end`)
+                return `task-${index}`
+            } finally {
+                executionOrder.push(`sub-task-${index}-finally`)
+            }
+        }
+
+        function* program() {
+            try {
+                return yield* Koka.try(Task.all([subTaskWithFinally(0), subTaskWithFinally(1)])).finally(function* () {
+                    executionOrder.push('sup-task-finally')
+                })
+            } finally {
+                executionOrder.push('outer-finally')
+            }
+        }
+
+        const result = await Koka.runAsync(program())
+        expect(result).toEqual(['task-0', 'task-1'])
+
+        // Verify execution order: sub-tasks complete, then their finally blocks, then sup-task finally, then outer finally
+        expect(executionOrder).toEqual([
+            'sub-task-0-start',
+            'sub-task-1-start',
+            'sub-task-0-end',
+            'sub-task-1-end',
+            'sub-task-0-finally',
+            'sub-task-1-finally',
+            'sup-task-finally',
+            'outer-finally',
+        ])
+    })
+
+    it('should handle sub-task finally execution when sub-task throws error', async () => {
+        const executionOrder: string[] = []
+        class SubTaskError extends Err.Err('SubTaskError')<string> {}
+
+        function* failingSubTask(index: number) {
+            try {
+                executionOrder.push(`sub-task-${index}-start`)
+                yield* Async.await(delayTime(10))
+                yield* Err.throw(new SubTaskError(`error-${index}`))
+                executionOrder.push(`sub-task-${index}-end`) // Should not reach here
+                return `task-${index}`
+            } finally {
+                executionOrder.push(`sub-task-${index}-finally`)
+            }
+        }
+
+        function* program() {
+            try {
+                return yield* Koka.try(Task.all([failingSubTask(0), failingSubTask(1)])).finally(function* () {
+                    executionOrder.push('sup-task-finally')
+                })
+            } finally {
+                executionOrder.push('outer-finally')
+            }
+        }
+
+        const result = await Koka.runAsync(
+            Koka.try(program()).handle({
+                SubTaskError: (error: string) => `Caught: ${error}`,
+            }),
+        )
+        expect(result).toBe('Caught: error-0') // First error wins
+
+        // Verify sub-task finally blocks execute even when sub-tasks fail
+        expect(executionOrder).toEqual([
+            'sub-task-0-start',
+            'sub-task-1-start',
+            'sub-task-0-finally',
+            'sub-task-1-finally',
+            'sup-task-finally',
+            'outer-finally',
+        ])
+    })
+
+    it('should execute finally blocks when Task.all is aborted', async () => {
+        const executionOrder: string[] = []
+        const controller = new AbortController()
+
+        function* longRunningSubTask(index: number) {
+            try {
+                executionOrder.push(`sub-task-${index}-start`)
+                yield* Async.await(new Promise(() => {})) // Never resolves
+                executionOrder.push(`sub-task-${index}-end`) // Should not reach here
+                return `task-${index}`
+            } finally {
+                executionOrder.push(`sub-task-${index}-finally`)
+            }
+        }
+
+        function* program() {
+            try {
+                return yield* Koka.try(Task.all([longRunningSubTask(0), longRunningSubTask(1)])).finally(function* () {
+                    executionOrder.push('sup-task-finally')
+                })
+            } finally {
+                executionOrder.push('outer-finally')
+            }
+        }
+
+        const promise = Koka.runAsync(program(), { abortSignal: controller.signal })
+
+        // Abort after a short delay to allow tasks to start
+        setTimeout(() => controller.abort(), 10)
+
+        await expect(promise).rejects.toThrow('Operation aborted')
+
+        // Verify finally blocks execute even when aborted
+        expect(executionOrder).toEqual([
+            'sub-task-0-start',
+            'sub-task-1-start',
+            'sub-task-0-finally',
+            'sub-task-1-finally',
+            'sup-task-finally',
+            'outer-finally',
+        ])
+    })
+
+    it('should execute finally blocks when Task.concurrent is aborted', async () => {
+        const executionOrder: string[] = []
+        const controller = new AbortController()
+
+        function* longRunningSubTask(index: number) {
+            try {
+                executionOrder.push(`sub-task-${index}-start`)
+                yield* Async.await(new Promise(() => {})) // Never resolves
+                executionOrder.push(`sub-task-${index}-end`) // Should not reach here
+                return `task-${index}`
+            } finally {
+                executionOrder.push(`sub-task-${index}-finally`)
+            }
+        }
+
+        function* program() {
+            try {
+                return yield* Koka.try(
+                    Task.concurrent([longRunningSubTask(0), longRunningSubTask(1)], async (stream) => {
+                        const results = []
+                        for await (const { value } of stream) {
+                            results.push(value)
+                        }
+                        return results
+                    }),
+                ).finally(function* () {
+                    executionOrder.push('sup-task-finally')
+                })
+            } finally {
+                executionOrder.push('outer-finally')
+            }
+        }
+
+        const promise = Koka.runAsync(program(), { abortSignal: controller.signal })
+
+        // Abort after a short delay to allow tasks to start
+        setTimeout(() => controller.abort(), 10)
+
+        await expect(promise).rejects.toThrow('Operation aborted')
+
+        // Verify finally blocks execute even when aborted
+        expect(executionOrder).toEqual([
+            'sub-task-0-start',
+            'sub-task-1-start',
+            'sub-task-0-finally',
+            'sub-task-1-finally',
+            'sup-task-finally',
+            'outer-finally',
+        ])
+    })
+
+    it('should execute finally blocks when Task.race is aborted', async () => {
+        const executionOrder: string[] = []
+        const controller = new AbortController()
+
+        function* longRunningSubTask(index: number) {
+            try {
+                executionOrder.push(`sub-task-${index}-start`)
+                yield* Async.await(new Promise(() => {})) // Never resolves
+                executionOrder.push(`sub-task-${index}-end`) // Should not reach here
+                return `task-${index}`
+            } finally {
+                executionOrder.push(`sub-task-${index}-finally`)
+            }
+        }
+
+        function* program() {
+            try {
+                return yield* Koka.try(Task.race([longRunningSubTask(0), longRunningSubTask(1)])).finally(function* () {
+                    executionOrder.push('sup-task-finally')
+                })
+            } finally {
+                executionOrder.push('outer-finally')
+            }
+        }
+
+        const promise = Koka.runAsync(program(), { abortSignal: controller.signal })
+
+        // Abort after a short delay to allow tasks to start
+        setTimeout(() => controller.abort(), 10)
+
+        await expect(promise).rejects.toThrow('Operation aborted')
+
+        // Verify finally blocks execute even when aborted
+        expect(executionOrder).toEqual([
+            'sub-task-0-start',
+            'sub-task-1-start',
+            'sub-task-0-finally',
+            'sub-task-1-finally',
+            'sup-task-finally',
+            'outer-finally',
+        ])
+    })
+
+    it('should handle nested Task methods with finally blocks and abort', async () => {
+        const executionOrder: string[] = []
+        const controller = new AbortController()
+
+        function* innerTask(index: number) {
+            try {
+                executionOrder.push(`inner-task-${index}-start`)
+                yield* Async.await(new Promise(() => {})) // Never resolves
+                executionOrder.push(`inner-task-${index}-end`) // Should not reach here
+                return `inner-${index}`
+            } finally {
+                executionOrder.push(`inner-task-${index}-finally`)
+            }
+        }
+
+        function* middleTask() {
+            try {
+                return yield* Koka.try(Task.all([innerTask(0), innerTask(1)])).finally(function* () {
+                    executionOrder.push('middle-finally')
+                })
+            } finally {
+                executionOrder.push('middle-outer-finally')
+            }
+        }
+
+        function* program() {
+            try {
+                return yield* Koka.try(
+                    Task.concurrent([middleTask()], async (stream) => {
+                        const results = []
+                        for await (const { value } of stream) {
+                            results.push(value)
+                        }
+                        return results
+                    }),
+                ).finally(function* () {
+                    executionOrder.push('outer-finally')
+                })
+            } finally {
+                executionOrder.push('program-finally')
+            }
+        }
+
+        const promise = Koka.runAsync(program(), { abortSignal: controller.signal })
+
+        // Abort after a short delay to allow tasks to start
+        setTimeout(() => controller.abort(), 10)
+
+        await expect(promise).rejects.toThrow('Operation aborted')
+
+        // Verify all finally blocks execute in reverse order when aborted
+        expect(executionOrder).toEqual([
+            'inner-task-0-start',
+            'inner-task-1-start',
+            'inner-task-0-finally',
+            'inner-task-1-finally',
+            'middle-finally',
+            'middle-outer-finally',
+            'outer-finally',
+            'program-finally',
+        ])
     })
 })

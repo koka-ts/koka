@@ -2,41 +2,20 @@ import * as Domain from 'koka-domain'
 import * as Async from 'koka/async'
 import * as Err from 'koka/err'
 
-export interface TodoStorage {
-    saveTodoList(todoList: Todo[]): Promise<void>
-    loadTodoList(): Promise<Todo[]>
-}
-
-export interface TodoStorageEnhancer {
-    todoStorage: TodoStorage
-}
-
-export interface TextLoggerEnhancer {
-    logText(text: string): void
-}
-
-export class CoreDomain<State, Root = any> extends Domain.Domain<
-    State,
-    Root,
-    TextLoggerEnhancer & TodoStorageEnhancer
-> {}
-
-export class TextDomain extends CoreDomain<string> {
+export class TextDomain extends Domain.Domain<string> {
     @Domain.command()
     *updateText(text: string) {
-        this.store.logText(`updateText: ${text}`)
         yield* Domain.set(this, text)
         return 'text updated'
     }
     @Domain.command()
     *clearText() {
-        this.store.logText(`clearText`)
         yield* Domain.set(this, '')
         return 'text cleared'
     }
 }
 
-export class BoolDomain extends CoreDomain<boolean> {
+export class BoolDomain extends Domain.Domain<boolean> {
     @Domain.command()
     *toggle() {
         yield* Domain.set(this, (value) => !value)
@@ -53,7 +32,7 @@ export type Todo = {
     done: boolean
 }
 
-export class TodoDomain extends CoreDomain<Todo> {
+export class TodoDomain extends Domain.Domain<Todo> {
     text$ = new TextDomain(this.prop('text'))
     done$ = new BoolDomain(this.prop('done'));
 
@@ -82,7 +61,7 @@ export class TodoDomain extends CoreDomain<Todo> {
 
 let todoUid = 100
 
-export class TodoListDomain extends CoreDomain<Todo[]> {
+export class TodoListDomain extends Domain.Domain<Todo[]> {
     @Domain.command()
     *addTodo(text: string) {
         const newTodo = {
@@ -186,7 +165,7 @@ export class TodoListDomain extends CoreDomain<Todo[]> {
 
 export type TodoFilter = 'all' | 'done' | 'undone'
 
-export class TodoFilterDomain extends CoreDomain<TodoFilter> {
+export class TodoFilterDomain extends Domain.Domain<TodoFilter> {
     @Domain.command()
     *setFilter(filter: TodoFilter) {
         yield* Domain.set(this, filter)
@@ -202,7 +181,7 @@ export type TodoApp = {
     input: string
 }
 
-export class TodoAppDomain extends CoreDomain<TodoApp> {
+export class TodoAppDomain extends Domain.Domain<TodoApp> {
     todos$ = new TodoListDomain(this.prop('todos'))
     filter$ = new TodoFilterDomain(this.prop('filter'))
     input$ = new TextDomain(this.prop('input'));

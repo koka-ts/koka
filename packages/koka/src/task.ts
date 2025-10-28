@@ -453,6 +453,32 @@ export function* race<Return, Yield extends Koka.AnyEff = never>(
     return result
 }
 
-export function* delay(ms: number): Generator<Async.Async, void> {
-    yield* Async.await(new Promise((resolve) => setTimeout(resolve, ms)))
+export type DelayOptions = {
+    signal?: AbortSignal
+}
+
+export function* delay(ms: number, options: DelayOptions = {}) {
+    const { promise, resolve, reject } = Promise.withResolvers<void>()
+
+    const controller = new AbortController()
+
+    const id = setTimeout(resolve, ms)
+
+    options.signal?.addEventListener(
+        'abort',
+        () => {
+            reject(new Error('Delay aborted'))
+        },
+        {
+            once: true,
+            signal: controller.signal,
+        },
+    )
+
+    try {
+        yield* Async.await(promise)
+    } finally {
+        clearTimeout(id)
+        controller.abort()
+    }
 }
