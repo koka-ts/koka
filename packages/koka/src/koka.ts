@@ -43,7 +43,7 @@ type GeneratorIterable<Yield, Return> = {
     [Symbol.iterator]: () => Generator<Yield, Return>
 }
 
-export function runEffector<Yield, Return>(effector: Effector<Yield, Return>): Generator<Yield, Return> {
+export function readEffector<Yield, Return>(effector: Effector<Yield, Return>): Generator<Yield, Return> {
     return typeof effector === 'function' ? effector() : effector[Symbol.iterator]()
 }
 
@@ -77,7 +77,7 @@ class TryPhase<Yield extends AnyEff, Return> extends EffPhase {
         this.effector = effector
     }
     [Symbol.iterator]() {
-        return runEffector(this.effector)
+        return readEffector(this.effector)
     }
     handle<Handlers extends Partial<EffectHandlers<Yield>>>(handlers: Handlers) {
         return new HandledPhase(this.effector, handlers)
@@ -101,7 +101,7 @@ class HandledPhase<Yield extends AnyEff, Return, Handlers extends Partial<Effect
     > {
         const effector = this.effector
         const handlers = this.handlers
-        const gen = runEffector(effector)
+        const gen = readEffector(effector)
         let result = gen.next()
         let status: 'returned' | 'thrown' | 'running' = 'running'
 
@@ -151,7 +151,7 @@ class HandledPhase<Yield extends AnyEff, Return, Handlers extends Partial<Effect
                     /**
                      * normal control flow, so we just run the final effectors
                      */
-                    const finalGen = runEffector(finalHandledEffector)
+                    const finalGen = readEffector(finalHandledEffector)
                     yield* finalGen as Generator<any, void>
                 } else if (status === 'running') {
                     /**
@@ -188,7 +188,7 @@ class FinalPhase<Yield extends AnyEff, Return> extends EffPhase {
         this.finalEffector = finalEffector
     }
     *[Symbol.iterator](): Generator<Yield | Final, Return> {
-        const gen = runEffector(this.effector)
+        const gen = readEffector(this.effector)
         const finalEffector = this.finalEffector
         let status: 'returned' | 'thrown' | 'running' = 'running'
         try {
@@ -201,7 +201,7 @@ class FinalPhase<Yield extends AnyEff, Return> extends EffPhase {
         } catch (error) {
             const childFinalEffector = extractFinalEffector(gen)
             if (childFinalEffector) {
-                const finalGen = runEffector(childFinalEffector)
+                const finalGen = readEffector(childFinalEffector)
                 yield* finalGen as Generator<any, void>
             }
             status = 'thrown'
@@ -210,7 +210,7 @@ class FinalPhase<Yield extends AnyEff, Return> extends EffPhase {
             if (status === 'running') {
                 const childFinalEffector = extractFinalEffector(gen)
                 const combinedFinalEffector = childFinalEffector
-                    ? serializeEffectors(childFinalEffector, finalEffector)
+                    ? chainEffectors(childFinalEffector, finalEffector)
                     : finalEffector
 
                 yield {
@@ -218,7 +218,7 @@ class FinalPhase<Yield extends AnyEff, Return> extends EffPhase {
                     effector: combinedFinalEffector,
                 }
             } else {
-                const finalGen = runEffector(finalEffector)
+                const finalGen = readEffector(finalEffector)
                 yield* finalGen as any
             }
         }
@@ -252,16 +252,16 @@ export const extractFinalEffector = function (gen: Generator<AnyEff, any>) {
     return finalEffector
 }
 
-const serializeEffectors = function* (first: FinalEffector, second: FinalEffector): Generator<AnyEff, void> {
-    const firstGen = runEffector(first)
+const chainEffectors = function* (first: FinalEffector, second: FinalEffector): Generator<AnyEff, void> {
+    const firstGen = readEffector(first)
     yield* firstGen
 
-    const secondGen = runEffector(second)
+    const secondGen = readEffector(second)
     yield* secondGen
 }
 
 export function runSync<E extends AnyOpt | Final, Return>(input: Effector<E, Return>): Return {
-    const gen = runEffector(input)
+    const gen = readEffector(input)
     let result = gen.next()
 
     while (!result.done) {
@@ -289,7 +289,7 @@ export async function runAsync<E extends Async | AnyOpt | Final, Return>(
         throw new Error('[Koka.runAsync]Operation aborted')
     }
 
-    const gen = runEffector(effector)
+    const gen = readEffector(effector)
     const { promise, resolve, reject } = withResolvers<Return>()
 
     const process = (result: IteratorResult<Async | AnyOpt | Final, Return>): MaybePromise<Return> => {

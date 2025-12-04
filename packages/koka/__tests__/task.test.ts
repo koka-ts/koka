@@ -2411,24 +2411,22 @@ describe('Task methods with Koka finally behavior', () => {
         const executionOrder: string[] = []
 
         function* subTaskWithFinally(index: number) {
-            try {
+            return yield* Koka.try(function* () {
                 executionOrder.push(`sub-task-${index}-start`)
-                yield* Async.await(delayTime(20))
-                executionOrder.push(`sub-task-${index}-end`)
+                yield* Async.await(delayTime(10))
                 return `task-${index}`
-            } finally {
+            }).finally(function* () {
                 executionOrder.push(`sub-task-${index}-finally`)
-            }
+            })
         }
 
         function* program() {
-            try {
-                return yield* Koka.try(Task.all([subTaskWithFinally(0), subTaskWithFinally(1)])).finally(function* () {
-                    executionOrder.push('sup-task-finally')
-                })
-            } finally {
-                executionOrder.push('outer-finally')
-            }
+            return yield* Koka.try(function* () {
+                executionOrder.push('program-start')
+                return yield* Task.all([subTaskWithFinally(0), subTaskWithFinally(1)])
+            }).finally(function* () {
+                executionOrder.push('program-finally')
+            })
         }
 
         const result = await Koka.runAsync(program())
@@ -2436,14 +2434,12 @@ describe('Task methods with Koka finally behavior', () => {
 
         // Verify execution order: sub-tasks complete, then their finally blocks, then sup-task finally, then outer finally
         expect(executionOrder).toEqual([
+            'program-start',
             'sub-task-0-start',
             'sub-task-1-start',
-            'sub-task-0-end',
-            'sub-task-1-end',
             'sub-task-0-finally',
             'sub-task-1-finally',
-            'sup-task-finally',
-            'outer-finally',
+            'program-finally',
         ])
     })
 
@@ -2452,25 +2448,22 @@ describe('Task methods with Koka finally behavior', () => {
         class SubTaskError extends Err.Err('SubTaskError')<string> {}
 
         function* failingSubTask(index: number) {
-            try {
+            return yield* Koka.try(function* () {
                 executionOrder.push(`sub-task-${index}-start`)
                 yield* Async.await(delayTime(10))
                 yield* Err.throw(new SubTaskError(`error-${index}`))
-                executionOrder.push(`sub-task-${index}-end`) // Should not reach here
-                return `task-${index}`
-            } finally {
+            }).finally(function* () {
                 executionOrder.push(`sub-task-${index}-finally`)
-            }
+            })
         }
 
         function* program() {
-            try {
-                return yield* Koka.try(Task.all([failingSubTask(0), failingSubTask(1)])).finally(function* () {
-                    executionOrder.push('sup-task-finally')
-                })
-            } finally {
-                executionOrder.push('outer-finally')
-            }
+            return yield* Koka.try(function* () {
+                executionOrder.push('program-start')
+                return yield* Task.all([failingSubTask(0), failingSubTask(1)])
+            }).finally(function* () {
+                executionOrder.push('program-finally')
+            })
         }
 
         const result = await Koka.runAsync(
@@ -2482,12 +2475,12 @@ describe('Task methods with Koka finally behavior', () => {
 
         // Verify sub-task finally blocks execute even when sub-tasks fail
         expect(executionOrder).toEqual([
+            'program-start',
             'sub-task-0-start',
             'sub-task-1-start',
             'sub-task-0-finally',
             'sub-task-1-finally',
-            'sup-task-finally',
-            'outer-finally',
+            'program-finally',
         ])
     })
 
@@ -2496,24 +2489,23 @@ describe('Task methods with Koka finally behavior', () => {
         const controller = new AbortController()
 
         function* longRunningSubTask(index: number) {
-            try {
+            return yield* Koka.try(function* () {
                 executionOrder.push(`sub-task-${index}-start`)
                 yield* Async.await(new Promise(() => {})) // Never resolves
                 executionOrder.push(`sub-task-${index}-end`) // Should not reach here
                 return `task-${index}`
-            } finally {
+            }).finally(function* () {
                 executionOrder.push(`sub-task-${index}-finally`)
-            }
+            })
         }
 
         function* program() {
-            try {
-                return yield* Koka.try(Task.all([longRunningSubTask(0), longRunningSubTask(1)])).finally(function* () {
-                    executionOrder.push('sup-task-finally')
-                })
-            } finally {
-                executionOrder.push('outer-finally')
-            }
+            return yield* Koka.try(function* () {
+                executionOrder.push('program-start')
+                return yield* Task.all([longRunningSubTask(0), longRunningSubTask(1)])
+            }).finally(function* () {
+                executionOrder.push('program-finally')
+            })
         }
 
         const promise = Koka.runAsync(program(), { abortSignal: controller.signal })
@@ -2525,12 +2517,12 @@ describe('Task methods with Koka finally behavior', () => {
 
         // Verify finally blocks execute even when aborted
         expect(executionOrder).toEqual([
+            'program-start',
             'sub-task-0-start',
             'sub-task-1-start',
             'sub-task-0-finally',
             'sub-task-1-finally',
-            'sup-task-finally',
-            'outer-finally',
+            'program-finally',
         ])
     })
 
@@ -2539,32 +2531,29 @@ describe('Task methods with Koka finally behavior', () => {
         const controller = new AbortController()
 
         function* longRunningSubTask(index: number) {
-            try {
+            return yield* Koka.try(function* () {
                 executionOrder.push(`sub-task-${index}-start`)
                 yield* Async.await(new Promise(() => {})) // Never resolves
                 executionOrder.push(`sub-task-${index}-end`) // Should not reach here
                 return `task-${index}`
-            } finally {
+            }).finally(function* () {
                 executionOrder.push(`sub-task-${index}-finally`)
-            }
+            })
         }
 
         function* program() {
-            try {
-                return yield* Koka.try(
-                    Task.concurrent([longRunningSubTask(0), longRunningSubTask(1)], async (stream) => {
-                        const results = []
-                        for await (const { value } of stream) {
-                            results.push(value)
-                        }
-                        return results
-                    }),
-                ).finally(function* () {
-                    executionOrder.push('sup-task-finally')
+            return yield* Koka.try(function* () {
+                executionOrder.push('program-start')
+                return yield* Task.concurrent([longRunningSubTask(0), longRunningSubTask(1)], async (stream) => {
+                    const results = []
+                    for await (const { value } of stream) {
+                        results.push(value)
+                    }
+                    return results
                 })
-            } finally {
-                executionOrder.push('outer-finally')
-            }
+            }).finally(function* () {
+                executionOrder.push('program-finally')
+            })
         }
 
         const promise = Koka.runAsync(program(), { abortSignal: controller.signal })
@@ -2576,12 +2565,12 @@ describe('Task methods with Koka finally behavior', () => {
 
         // Verify finally blocks execute even when aborted
         expect(executionOrder).toEqual([
+            'program-start',
             'sub-task-0-start',
             'sub-task-1-start',
             'sub-task-0-finally',
             'sub-task-1-finally',
-            'sup-task-finally',
-            'outer-finally',
+            'program-finally',
         ])
     })
 
@@ -2590,26 +2579,24 @@ describe('Task methods with Koka finally behavior', () => {
         const controller = new AbortController()
 
         function* longRunningSubTask(index: number) {
-            try {
+            return yield* Koka.try(function* () {
                 executionOrder.push(`sub-task-${index}-start`)
                 yield* Async.await(new Promise(() => {})) // Never resolves
                 executionOrder.push(`sub-task-${index}-end`) // Should not reach here
                 return `task-${index}`
-            } finally {
+            }).finally(function* () {
                 executionOrder.push(`sub-task-${index}-finally`)
-            }
+            })
         }
 
         function* program() {
-            try {
-                return yield* Koka.try(Task.race([longRunningSubTask(0), longRunningSubTask(1)])).finally(function* () {
-                    executionOrder.push('sup-task-finally')
-                })
-            } finally {
-                executionOrder.push('outer-finally')
-            }
+            return yield* Koka.try(function* () {
+                executionOrder.push('program-start')
+                return yield* Task.race([longRunningSubTask(0), longRunningSubTask(1)])
+            }).finally(function* () {
+                executionOrder.push('program-finally')
+            })
         }
-
         const promise = Koka.runAsync(program(), { abortSignal: controller.signal })
 
         // Abort after a short delay to allow tasks to start
@@ -2619,12 +2606,12 @@ describe('Task methods with Koka finally behavior', () => {
 
         // Verify finally blocks execute even when aborted
         expect(executionOrder).toEqual([
+            'program-start',
             'sub-task-0-start',
             'sub-task-1-start',
             'sub-task-0-finally',
             'sub-task-1-finally',
-            'sup-task-finally',
-            'outer-finally',
+            'program-finally',
         ])
     })
 
@@ -2633,42 +2620,32 @@ describe('Task methods with Koka finally behavior', () => {
         const controller = new AbortController()
 
         function* innerTask(index: number) {
-            try {
+            return yield* Koka.try(function* () {
                 executionOrder.push(`inner-task-${index}-start`)
                 yield* Async.await(new Promise(() => {})) // Never resolves
                 executionOrder.push(`inner-task-${index}-end`) // Should not reach here
                 return `inner-${index}`
-            } finally {
+            }).finally(function* () {
                 executionOrder.push(`inner-task-${index}-finally`)
-            }
+            })
         }
 
         function* middleTask() {
-            try {
-                return yield* Koka.try(Task.all([innerTask(0), innerTask(1)])).finally(function* () {
-                    executionOrder.push('middle-finally')
-                })
-            } finally {
-                executionOrder.push('middle-outer-finally')
-            }
+            return yield* Koka.try(function* () {
+                executionOrder.push('middle-task-start')
+                return yield* Task.all([innerTask(0), innerTask(1)])
+            }).finally(function* () {
+                executionOrder.push('middle-task-finally')
+            })
         }
 
         function* program() {
-            try {
-                return yield* Koka.try(
-                    Task.concurrent([middleTask()], async (stream) => {
-                        const results = []
-                        for await (const { value } of stream) {
-                            results.push(value)
-                        }
-                        return results
-                    }),
-                ).finally(function* () {
-                    executionOrder.push('outer-finally')
-                })
-            } finally {
+            return yield* Koka.try(function* () {
+                executionOrder.push('program-start')
+                return yield* middleTask()
+            }).finally(function* () {
                 executionOrder.push('program-finally')
-            }
+            })
         }
 
         const promise = Koka.runAsync(program(), { abortSignal: controller.signal })
@@ -2680,13 +2657,13 @@ describe('Task methods with Koka finally behavior', () => {
 
         // Verify all finally blocks execute in reverse order when aborted
         expect(executionOrder).toEqual([
+            'program-start',
+            'middle-task-start',
             'inner-task-0-start',
             'inner-task-1-start',
             'inner-task-0-finally',
             'inner-task-1-finally',
-            'middle-finally',
-            'middle-outer-finally',
-            'outer-finally',
+            'middle-task-finally',
             'program-finally',
         ])
     })

@@ -89,7 +89,7 @@ const createTaskConsumer = <TaskReturn, Yield extends Koka.AnyEff = never>(input
             return
         }
 
-        const gen = Koka.runEffector(task)
+        const gen = Koka.readEffector(task)
 
         return gen
     }
@@ -102,7 +102,7 @@ const createTaskConsumer = <TaskReturn, Yield extends Koka.AnyEff = never>(input
 export function* series<TaskReturn, HandlerReturn, Yield extends Koka.AnyEff = never>(
     inputs: TaskSource<Yield, TaskReturn>,
     handler: TaskResultsHandler<TaskReturn, HandlerReturn>,
-): Generator<Yield | Async.Async, HandlerReturn> {
+): Generator<Yield | Async.Async | Koka.Final, HandlerReturn> {
     return yield* concurrent(inputs, handler, {
         maxConcurrency: 1,
     })
@@ -111,7 +111,7 @@ export function* series<TaskReturn, HandlerReturn, Yield extends Koka.AnyEff = n
 export function* parallel<TaskReturn, HandlerReturn, Yield extends Koka.AnyEff = never>(
     inputs: TaskSource<Yield, TaskReturn>,
     handler: TaskResultsHandler<TaskReturn, HandlerReturn>,
-): Generator<Yield | Async.Async, HandlerReturn> {
+): Generator<Yield | Async.Async | Koka.Final, HandlerReturn> {
     return yield* concurrent(inputs, handler, {
         maxConcurrency: Number.POSITIVE_INFINITY,
     })
@@ -125,7 +125,7 @@ export function* concurrent<TaskReturn, HandlerReturn, Yield extends Koka.AnyEff
     inputs: TaskSource<Yield, TaskReturn>,
     handler: TaskResultsHandler<TaskReturn, HandlerReturn>,
     options?: ConcurrentOptions,
-): Generator<Async.Async | Yield, HandlerReturn> {
+): Generator<Async.Async | Yield | Koka.Final, HandlerReturn> {
     const config = {
         maxConcurrency: Number.POSITIVE_INFINITY,
         ...options,
@@ -184,11 +184,14 @@ export function* concurrent<TaskReturn, HandlerReturn, Yield extends Koka.AnyEff
 
     const stream = createStream<TaskResult<TaskReturn>>()
 
-    const cleanUpAllGen = () => {
+    const cleanUpAllGen = function* (): Generator<Koka.Final, void> {
         // Clean up any remaining items
         for (const item of items) {
             if (item.type !== 'completed') {
-                Gen.cleanUpGen(item.gen)
+                const finalEffector = Koka.extractFinalEffector(item.gen)
+                if (finalEffector) {
+                    yield* Koka.readEffector(finalEffector) as Generator<Koka.Final, void>
+                }
             }
         }
     }
@@ -204,6 +207,8 @@ export function* concurrent<TaskReturn, HandlerReturn, Yield extends Koka.AnyEff
     }
 
     type HandlerResult = HandlerOk | HandlerErr
+
+    let status: 'running' | 'returned' | 'thrown' = 'running'
 
     try {
         const promises: Promise<void | HandlerResult>[] = []
@@ -365,10 +370,21 @@ export function* concurrent<TaskReturn, HandlerReturn, Yield extends Koka.AnyEff
         if (handlerResult.type === 'err') {
             throw handlerResult.error
         } else {
+            status = 'returned'
             return handlerResult.value
         }
+    } catch (error) {
+        status = 'thrown'
+        throw error
     } finally {
-        cleanUpAllGen()
+        if (status === 'running') {
+            yield {
+                type: 'final',
+                effector: cleanUpAllGen,
+            }
+        } else if (status === 'returned' || status === 'thrown') {
+            yield* cleanUpAllGen()
+        }
     }
 }
 
@@ -412,7 +428,7 @@ export type AllOptions = {
 export function* all<Return, Yield extends Koka.AnyEff = never>(
     inputs: TaskSource<Yield, Return>,
     options?: AllOptions,
-): Generator<Yield | Async.Async, Return[]> {
+): Generator<Yield | Async.Async | Koka.Final, Return[]> {
     const results = yield* concurrent(
         inputs,
         async (stream) => {
@@ -437,7 +453,7 @@ export type RaceOptions = {
 export function* race<Return, Yield extends Koka.AnyEff = never>(
     inputs: TaskSource<Yield, Return>,
     options?: RaceOptions,
-): Generator<Yield | Async.Async, Return> {
+): Generator<Yield | Async.Async | Koka.Final, Return> {
     const result = yield* concurrent(
         inputs,
         async (stream) => {

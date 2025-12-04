@@ -34,7 +34,7 @@ export type InferOkValue<T> = T extends Ok<infer U> ? U : never
 export function* wrap<Return, Yield extends Koka.AnyEff = never>(
     effector: Koka.Effector<Yield, Return>,
 ): Generator<Err.ExcludeErr<Yield> | Koka.Final, Ok<Return> | Err.ExtractErr<Yield>> {
-    const gen = Koka.runEffector(effector)
+    const gen = Koka.readEffector(effector)
     let status: 'running' | 'returned' | 'thrown' = 'running'
     try {
         let result = gen.next()
@@ -64,7 +64,7 @@ export function* wrap<Return, Yield extends Koka.AnyEff = never>(
             if (status === 'running') {
                 yield { type: 'final', effector: finalEffector }
             } else {
-                yield* Koka.runEffector(finalEffector) as Generator<Koka.Final, void>
+                yield* Koka.readEffector(finalEffector) as Generator<Koka.Final, void>
             }
         }
     }
@@ -77,7 +77,7 @@ export function* wrap<Return, Yield extends Koka.AnyEff = never>(
 export function* unwrap<Return extends AnyOk | Err.AnyErr, Yield>(
     effector: Koka.Effector<Yield, Return>,
 ): Generator<Yield | Err.ExtractErr<Return>, InferOkValue<Return>> {
-    const gen = Koka.runEffector(effector)
+    const gen = Koka.readEffector(effector)
     const result = yield* gen
 
     if (result.type === 'ok') {
