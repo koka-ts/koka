@@ -10,7 +10,7 @@ type FinalEffector = Effector<AnyEff, void>
 
 export type Final = {
     type: 'final'
-    effector: FinalEffector
+    status: 'start' | 'end'
 }
 
 export type Eff<T> = Err<string, T> | Ctx<string, T> | Opt<string, T> | Async | Final
@@ -47,27 +47,8 @@ export function readEffector<Yield, Return>(effector: Effector<Yield, Return>): 
     return typeof effector === 'function' ? effector() : effector[Symbol.iterator]()
 }
 
-type InferPhaseYield<G extends GeneratorIterable<any, any>> = G extends GeneratorIterable<infer Yield, any>
-    ? Yield
-    : never
-
-type InferPhaseReturn<G extends GeneratorIterable<any, any>> = G extends GeneratorIterable<any, infer Return>
-    ? Return
-    : never
-
 abstract class EffPhase {
     abstract [Symbol.iterator](): Generator<AnyEff, unknown>
-    runAsync(
-        this: InferPhaseYield<this> extends Async | AnyOpt | Final ? this : `runAsync is not available for this type`,
-        options?: RunAsyncOptions,
-    ): Promise<InferPhaseReturn<this>> {
-        return runAsync(this as any, options)
-    }
-    runSync(
-        this: InferPhaseYield<this> extends AnyOpt | Final ? this : `runSync is not available for this type`,
-    ): InferPhaseReturn<this> {
-        return runSync(this as any)
-    }
 }
 
 class TryPhase<Yield extends AnyEff, Return> extends EffPhase {
@@ -80,10 +61,59 @@ class TryPhase<Yield extends AnyEff, Return> extends EffPhase {
         return readEffector(this.effector)
     }
     handle<Handlers extends Partial<EffectHandlers<Yield>>>(handlers: Handlers) {
-        return new HandledPhase(this.effector, handlers)
+        return new HandledPhase(this, handlers)
     }
-    finally<Eff extends AnyEff = never>(effector: Effector<Eff, void>) {
-        return new FinalPhase<Yield | Eff, Return>(this.effector, effector)
+    finally<FinalYield extends AnyEff = never>(finalEffector: Effector<FinalYield, void>) {
+        return new FinalPhase<Yield | FinalYield, Return>(this, finalEffector)
+    }
+}
+
+type FinalState = {
+    errors: Error[]
+}
+
+export function getNativeError(error: unknown): Error {
+    if (error instanceof Error) {
+        return error
+    } else {
+        return new Error(String(error))
+    }
+}
+
+export function* cleanUpGen<Yield extends AnyEff, Return>(
+    gen: Generator<Yield, Return>,
+    result: IteratorResult<Yield | Final, Return> = (gen as any).return(undefined),
+): Generator<Yield | Final, void> {
+    if (result.done) {
+        return
+    }
+
+    const finalState: FinalState = yield {
+        type: 'final',
+        status: 'start',
+    }
+
+    try {
+        while (!result.done) {
+            const effect = result.value
+            if (effect.type === 'final') {
+                if (effect.status === 'start') {
+                    result = gen.next(finalState)
+                } else {
+                    effect.status satisfies 'end'
+                    result = (gen as any).return(undefined)
+                }
+            } else {
+                result = gen.next(yield effect as any)
+            }
+        }
+    } catch (error) {
+        finalState.errors.push(getNativeError(error))
+    }
+
+    yield {
+        type: 'final',
+        status: 'end',
     }
 }
 
@@ -99,36 +129,24 @@ class HandledPhase<Yield extends AnyEff, Return, Handlers extends Partial<Effect
         Exclude<Yield, { name: keyof Handlers }> | Final,
         Return | ExtractErrorHandlerReturn<Handlers, Yield>
     > {
-        const effector = this.effector
         const handlers = this.handlers
-        const gen = readEffector(effector)
+        const gen = readEffector(this.effector)
         let result = gen.next()
-        let status: 'returned' | 'thrown' | 'running' = 'running'
 
         try {
             while (!result.done) {
                 const effect = result.value
-
                 if (effect.type === 'err') {
                     const errorHandler = handlers[effect.name as keyof Handlers]
 
                     if (typeof errorHandler === 'function') {
-                        status = 'thrown'
                         return errorHandler(effect.error)
                     } else {
                         result = gen.next(yield effect as any)
                     }
-                } else if (effect.type === 'ctx') {
+                } else if (effect.type === 'ctx' || effect.type === 'opt') {
                     if (effect.name in handlers) {
                         result = gen.next(handlers[effect.name as keyof Handlers])
-                    } else {
-                        result = gen.next(yield effect as any)
-                    }
-                } else if (effect.type === 'opt') {
-                    const optValue = handlers[effect.name as keyof Handlers]
-
-                    if (optValue !== undefined) {
-                        result = gen.next(optValue)
                     } else {
                         result = gen.next(yield effect as any)
                     }
@@ -137,45 +155,23 @@ class HandledPhase<Yield extends AnyEff, Return, Handlers extends Partial<Effect
                 }
             }
 
-            status = 'returned'
             return result.value
-        } catch (error) {
-            status = 'thrown'
-            throw error
         } finally {
-            const finalEffector = extractFinalEffector(gen)
-
-            if (finalEffector) {
-                const finalHandledEffector = new TryPhase(finalEffector).handle(this.handlers)
-                if (status === 'thrown') {
-                    /**
-                     * normal control flow, so we just run the final effectors
-                     */
-                    const finalGen = readEffector(finalHandledEffector)
-                    yield* finalGen as Generator<any, void>
-                } else if (status === 'running') {
-                    /**
-                     * trigger from gen.return(undefined) that can only yield once with Final effect
-                     */
-                    yield {
-                        type: 'final',
-                        effector: finalHandledEffector,
-                    } as Final
-                } else {
-                    /**
-                     * when status is 'returned', it means gen should not yield again, so we throw an error
-                     */
-                    throw new Error(`[Koka]Unexpected status: ${status}`)
-                }
+            const result = (gen as any).return(undefined)
+            if (!result.done) {
+                /**
+                 * If the generator is not done, we need to clean up the generator
+                 * with the preloaded result and the handlers
+                 */
+                yield* new HandledPhase(cleanUpGen(gen, result), this.handlers)
             }
         }
     }
     [Symbol.iterator]() {
         return this.handleEffects()
     }
-    finally<Eff extends AnyEff = never>(effector: Effector<Eff, void>) {
-        const gen = this[Symbol.iterator]()
-        return new FinalPhase(gen, effector)
+    finally<Eff extends AnyEff = never>(finalEffector: Effector<Eff, void>) {
+        return new FinalPhase(this, finalEffector)
     }
 }
 
@@ -188,38 +184,36 @@ class FinalPhase<Yield extends AnyEff, Return> extends EffPhase {
         this.finalEffector = finalEffector
     }
     *[Symbol.iterator](): Generator<Yield | Final, Return> {
-        const gen = readEffector(this.effector)
-        const finalEffector = this.finalEffector
-        let status: 'returned' | 'thrown' | 'running' = 'running'
         try {
-            let result = gen.next()
-            while (!result.done) {
-                result = gen.next(yield result.value)
-            }
-            status = 'returned'
-            return result.value
-        } catch (error) {
-            const childFinalEffector = extractFinalEffector(gen)
-            if (childFinalEffector) {
-                const finalGen = readEffector(childFinalEffector)
-                yield* finalGen as Generator<any, void>
-            }
-            status = 'thrown'
-            throw error
+            return yield* readEffector(this.effector)
         } finally {
-            if (status === 'running') {
-                const childFinalEffector = extractFinalEffector(gen)
-                const combinedFinalEffector = childFinalEffector
-                    ? chainEffectors(childFinalEffector, finalEffector)
-                    : finalEffector
+            const finalState: FinalState = yield {
+                type: 'final',
+                status: 'start',
+            }
 
-                yield {
-                    type: 'final',
-                    effector: combinedFinalEffector,
+            const finalGen = readEffector(this.finalEffector)
+            let result = finalGen.next()
+            try {
+                while (!result.done) {
+                    const effect = result.value
+                    if (effect.type === 'final') {
+                        result = finalGen.next(finalState)
+                    } else {
+                        result = finalGen.next(yield effect as any)
+                    }
                 }
-            } else {
-                const finalGen = readEffector(finalEffector)
-                yield* finalGen as any
+            } catch (error) {
+                finalState.errors.push(getNativeError(error))
+            } finally {
+                try {
+                    yield* cleanUpGen(finalGen) as Generator<Final, void>
+                } finally {
+                    yield {
+                        type: 'final',
+                        status: 'end',
+                    }
+                }
             }
         }
     }
@@ -231,37 +225,30 @@ function tryEffect<Yield extends AnyEff, Return>(effector: Effector<Yield, Retur
 
 export { tryEffect as try }
 
-export const extractFinalEffector = function (gen: Generator<AnyEff, any>) {
-    let finalEffector: FinalEffector | undefined
-    let result = (gen as any).return(undefined)
-
-    while (!result.done) {
-        const effect = result.value
-        if (effect?.type === 'final') {
-            if (finalEffector) {
-                throw new Error(`[Koka]Multiple 'final' effects yielded. Only one 'final' effect is allowed.`)
-            }
-            finalEffector = effect.effector
-        } else {
-            throw new Error(`[Koka]Unsupported yield value in 'finally block': ${JSON.stringify(effect, null, 2)}`)
-        }
-
-        result = (gen as any).return(undefined)
-    }
-
-    return finalEffector
+function getAggregateErrorMessage(errors: Error[]): string {
+    return errors.map((error) => error.stack ?? error.message).join('\n')
 }
 
-const chainEffectors = function* (first: FinalEffector, second: FinalEffector): Generator<AnyEff, void> {
-    const firstGen = readEffector(first)
-    yield* firstGen
-
-    const secondGen = readEffector(second)
-    yield* secondGen
+function printAggreErrorMessages(errors: Error[]): void {
+    const error = new AggregateError(errors, getAggregateErrorMessage(errors))
+    console.log(error)
 }
 
-export function runSync<E extends AnyOpt | Final, Return>(input: Effector<E, Return>): Return {
+export type RunSyncOptions = {
+    onCleanupErrors?: (errors: Error[]) => unknown
+}
+
+export function runSync<E extends AnyOpt | Final, Return>(
+    input: Effector<E, Return>,
+    options?: RunSyncOptions,
+): Return {
     const gen = readEffector(input)
+    let finalState: FinalState = {
+        errors: [],
+    }
+    let finalCount = 0
+    const onCleanupErrors = options?.onCleanupErrors ?? printAggreErrorMessages
+
     let result = gen.next()
 
     while (!result.done) {
@@ -269,6 +256,23 @@ export function runSync<E extends AnyOpt | Final, Return>(input: Effector<E, Ret
 
         if (effect.type === 'opt') {
             result = gen.next()
+        } else if (effect.type === 'final') {
+            if (effect.status === 'start') {
+                finalCount++
+            } else {
+                effect.status satisfies 'end'
+                finalCount--
+            }
+
+            if (finalCount === 0) {
+                if (finalState.errors.length > 0) {
+                    onCleanupErrors(finalState.errors)
+                    finalState = {
+                        errors: [],
+                    }
+                }
+            }
+            result = gen.next(finalState)
         } else {
             throw new Error(`[Koka.runSync]Unexpected effect: ${JSON.stringify(effect, null, 2)}`)
         }
@@ -279,6 +283,7 @@ export function runSync<E extends AnyOpt | Final, Return>(input: Effector<E, Ret
 
 export type RunAsyncOptions = {
     abortSignal?: AbortSignal
+    onCleanupErrors?: (errors: Error[]) => unknown
 }
 
 export async function runAsync<E extends Async | AnyOpt | Final, Return>(
@@ -291,9 +296,18 @@ export async function runAsync<E extends Async | AnyOpt | Final, Return>(
 
     const gen = readEffector(effector)
     const { promise, resolve, reject } = withResolvers<Return>()
+    const onCleanupErrors = options?.onCleanupErrors ?? printAggreErrorMessages
+    let finalState: FinalState = {
+        errors: [],
+    }
+    let finalCount = 0
+    let isAborted = false
 
     const process = (result: IteratorResult<Async | AnyOpt | Final, Return>): MaybePromise<Return> => {
         while (!result.done) {
+            if (isAborted) {
+                throw new Error('[Koka.runAsync]Operation aborted')
+            }
             const effect = result.value
             if (effect.type === 'async') {
                 return effect.promise.then(
@@ -306,6 +320,27 @@ export async function runAsync<E extends Async | AnyOpt | Final, Return>(
                 ) as MaybePromise<Return>
             } else if (effect.type === 'opt') {
                 result = gen.next()
+            } else if (effect.type === 'final') {
+                if (effect.status === 'start') {
+                    finalCount++
+                } else {
+                    effect.status satisfies 'end'
+                    finalCount--
+                }
+
+                if (finalCount === 0) {
+                    if (finalState.errors.length > 0) {
+                        onCleanupErrors(finalState.errors)
+                        finalState = {
+                            errors: [],
+                        }
+                    }
+
+                    if (isAborted) {
+                        throw new Error('[Koka.runAsync]Operation aborted')
+                    }
+                }
+                result = gen.next(finalState)
             } else {
                 throw new Error(`[Koka.runAsync]Unexpected effect: ${JSON.stringify(effect, null, 2)}`)
             }
@@ -319,7 +354,10 @@ export async function runAsync<E extends Async | AnyOpt | Final, Return>(
     options?.abortSignal?.addEventListener(
         'abort',
         () => {
-            reject(new Error('[Koka.runAsync]Operation aborted'))
+            isAborted = true
+            if (finalCount === 0) {
+                reject(new Error('[Koka.runAsync]Operation aborted'))
+            }
         },
         {
             once: true,
@@ -341,10 +379,9 @@ export async function runAsync<E extends Async | AnyOpt | Final, Return>(
     try {
         return await promise
     } catch (error) {
-        const finalEffector = extractFinalEffector(gen)
-        if (finalEffector) {
-            await runAsync(finalEffector as any)
-        }
+        await runAsync(cleanUpGen(gen), {
+            onCleanupErrors,
+        })
         throw error
     } finally {
         abortController?.abort()

@@ -139,30 +139,17 @@ export function* concurrent<TaskReturn, HandlerReturn, Yield extends Koka.AnyEff
         type: 'initial'
         gen: Generator<Yield, TaskReturn>
         index: number
+        finalCount: number
     }
 
     type ProcessedItem = {
         type: 'completed'
         index: number
         gen: Generator<Yield, TaskReturn>
-        value: TaskReturn
+        finalCount: number
     }
 
     type ProcessItem = ProcessingItem | ProcessedItem
-
-    type ProcessOk = {
-        type: 'ok'
-        item: ProcessItem
-        value: unknown
-    }
-
-    type ProcessErr = {
-        type: 'err'
-        item: ProcessItem
-        error: unknown
-    }
-
-    type ProcessResult = ProcessOk | ProcessErr
 
     const items = [] as ProcessItem[]
 
@@ -179,64 +166,76 @@ export function* concurrent<TaskReturn, HandlerReturn, Yield extends Koka.AnyEff
             type: 'initial',
             gen,
             index: items.length,
+            finalCount: 0,
         })
     }
 
     const stream = createStream<TaskResult<TaskReturn>>()
 
-    const cleanUpAllGen = function* (): Generator<Koka.Final, void> {
+    let isCleaningUp = false
+    const cleanUpAllGen = function* (): Generator<Yield | Koka.Final | Async.Async, void> {
+        if (isCleaningUp) {
+            return
+        }
+
+        isCleaningUp = true
+
+        const cleanups = [] as Generator<Yield | Koka.Final | Async.Async, void>[]
         // Clean up any remaining items
         for (const item of items) {
             if (item.type !== 'completed') {
-                const finalEffector = Koka.extractFinalEffector(item.gen)
-                if (finalEffector) {
-                    yield* Koka.readEffector(finalEffector) as Generator<Koka.Final, void>
+                const result: IteratorResult<Yield, TaskReturn> = (item.gen as any).return(undefined)
+                if (!result.done) {
+                    cleanups.push(Koka.cleanUpGen(item.gen, result))
                 }
             }
         }
+
+        if (cleanups.length === 0) {
+            return
+        }
+
+        if (cleanups.length === 1) {
+            yield* cleanups[0]
+            return
+        }
+
+        yield {
+            type: 'final',
+            status: 'start',
+        }
+
+        yield* all(cleanups)
+
+        yield {
+            type: 'final',
+            status: 'end',
+        }
     }
-
-    type HandlerOk = {
-        type: 'ok'
-        value: HandlerReturn
-    }
-
-    type HandlerErr = {
-        type: 'err'
-        error: unknown
-    }
-
-    type HandlerResult = HandlerOk | HandlerErr
-
-    let status: 'running' | 'returned' | 'thrown' = 'running'
 
     try {
-        const promises: Promise<void | HandlerResult>[] = []
-        const processResults: ProcessResult[] = []
+        const promiseMap: Map<ProcessItem, Promise<void>> = new Map()
+        const pendingTaskList: Generator<Yield, ProcessItem | undefined>[] = []
 
-        const wrapPromise = (promise: Promise<unknown>, item: ProcessItem): Promise<void> => {
-            const wrappedPromise: Promise<void> = promise.then(
+        const handlePromise = (promise: Promise<unknown>, item: ProcessItem) => {
+            return promise.then(
                 (value) => {
-                    promises.splice(promises.indexOf(wrappedPromise), 1)
-                    processResults.push({
-                        type: 'ok',
-                        item,
-                        value,
-                    })
+                    if ((hasHandlerResult || isCleaningUp) && item.finalCount === 0) {
+                        return
+                    }
+
+                    const result = item.gen.next(value)
+                    pendingTaskList.push(processItem(item, result))
                 },
                 (error: unknown) => {
-                    promises.splice(promises.indexOf(wrappedPromise), 1)
-                    processResults.push({
-                        type: 'err',
-                        item,
-                        error,
-                    })
+                    if ((hasHandlerResult || isCleaningUp) && item.finalCount === 0) {
+                        return
+                    }
+
+                    const result = item.gen.throw(error)
+                    pendingTaskList.push(processItem(item, result))
                 },
             )
-
-            promises.push(wrappedPromise)
-
-            return wrappedPromise
         }
 
         const processItem = function* (
@@ -244,11 +243,23 @@ export function* concurrent<TaskReturn, HandlerReturn, Yield extends Koka.AnyEff
             result: IteratorResult<Yield, TaskReturn>,
         ): Generator<any, ProcessItem | undefined, any> {
             while (!result.done) {
+                if ((hasHandlerResult || isCleaningUp) && item.finalCount === 0) {
+                    return
+                }
+
                 const effect = result.value
 
                 if (effect.type === 'async') {
-                    wrapPromise(effect.promise, item)
+                    handlePromise(effect.promise, item)
                     return
+                } else if (effect.type === 'final') {
+                    if (effect.status === 'start') {
+                        item.finalCount++
+                    } else {
+                        effect.status satisfies 'end'
+                        item.finalCount--
+                    }
+                    result = item.gen.next(yield effect)
                 } else {
                     result = item.gen.next(yield effect)
                 }
@@ -259,7 +270,7 @@ export function* concurrent<TaskReturn, HandlerReturn, Yield extends Koka.AnyEff
                     type: 'completed',
                     index: item.index,
                     gen: item.gen,
-                    value: result.value,
+                    finalCount: item.finalCount,
                 }
                 items[item.index] = processedItem
 
@@ -278,41 +289,32 @@ export function* concurrent<TaskReturn, HandlerReturn, Yield extends Koka.AnyEff
                     type: 'initial',
                     gen,
                     index: items.length,
+                    finalCount: 0,
                 }
 
                 items.push(newItem)
 
                 return newItem
-            } else if (item.type === 'completed') {
+            } else {
+                item.type satisfies 'completed'
                 throw new Error(
                     `Unexpected completion of item that was already completed: ${JSON.stringify(item, null, 2)}`,
                 )
-            } else {
-                item satisfies never
-                throw new Error(`Unexpected item type: ${JSON.stringify(item, null, 2)}`)
             }
         }
 
-        let handlerResult: HandlerResult | undefined
+        const handlerPromise = handler(stream.gen)
 
-        const handlerPromise = handler(stream.gen).then(
-            (value) => {
-                handlerResult = {
-                    type: 'ok',
-                    value,
-                }
-                return handlerResult
+        let hasHandlerResult = false
+
+        handlerPromise.then(
+            () => {
+                hasHandlerResult = true
             },
-            (error) => {
-                handlerResult = {
-                    type: 'err',
-                    error,
-                }
-                return handlerResult
+            () => {
+                hasHandlerResult = true
             },
         )
-
-        promises.push(handlerPromise)
 
         let count = 0
 
@@ -321,70 +323,25 @@ export function* concurrent<TaskReturn, HandlerReturn, Yield extends Koka.AnyEff
             yield* processItem(item, item.gen.next())
         }
 
-        while (promises.length > 0) {
-            if (handlerResult) {
-                break
-            }
+        while (promiseMap.size > 0) {
+            yield* Async.await(Promise.race(promiseMap.values()))
 
-            if (promises.length !== 1) {
-                const result = yield* Async.await(Promise.race(promises))
+            while (pendingTaskList.length > 0) {
+                const task = pendingTaskList.shift()!
 
-                if (result) {
-                    break
-                }
-            }
-
-            while (processResults.length > 0) {
-                const processResult = processResults.shift()!
-                const item = processResult.item
-
-                let result: IteratorResult<Yield, TaskReturn>
-
-                if (processResult.type === 'ok') {
-                    result = item.gen.next(processResult.value)
-                } else {
-                    result = item.gen.throw(processResult.error)
-                }
-
-                let newItem = yield* processItem(item, result)
+                let newItem = yield* task
 
                 while (newItem) {
                     newItem = yield* processItem(newItem, newItem.gen.next())
                 }
             }
-
-            if (promises.length === 1) {
-                stream.done()
-                const result = yield* Async.await(promises[0])
-
-                if (result) {
-                    break
-                }
-            }
         }
 
-        if (!handlerResult) {
-            throw new Error(`Handler did not resolve or reject`)
-        }
+        stream.done()
 
-        if (handlerResult.type === 'err') {
-            throw handlerResult.error
-        } else {
-            status = 'returned'
-            return handlerResult.value
-        }
-    } catch (error) {
-        status = 'thrown'
-        throw error
+        return yield* Async.await(handlerPromise)
     } finally {
-        if (status === 'running') {
-            yield {
-                type: 'final',
-                effector: cleanUpAllGen,
-            }
-        } else if (status === 'returned' || status === 'thrown') {
-            yield* cleanUpAllGen()
-        }
+        yield* cleanUpAllGen()
     }
 }
 

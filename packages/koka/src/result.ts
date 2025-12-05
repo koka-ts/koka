@@ -35,7 +35,6 @@ export function* wrap<Return, Yield extends Koka.AnyEff = never>(
     effector: Koka.Effector<Yield, Return>,
 ): Generator<Err.ExcludeErr<Yield> | Koka.Final, Ok<Return> | Err.ExtractErr<Yield>> {
     const gen = Koka.readEffector(effector)
-    let status: 'running' | 'returned' | 'thrown' = 'running'
     try {
         let result = gen.next()
 
@@ -43,30 +42,18 @@ export function* wrap<Return, Yield extends Koka.AnyEff = never>(
             const effect = result.value
 
             if (effect.type === 'err') {
-                status = 'thrown'
                 return effect as Err.ExtractErr<Yield>
             } else {
                 result = gen.next(yield effect as any)
             }
         }
 
-        status = 'returned'
         return {
             type: 'ok',
             value: result.value,
         }
-    } catch (error) {
-        status = 'thrown'
-        throw error
     } finally {
-        const finalEffector = Koka.extractFinalEffector(gen)
-        if (finalEffector) {
-            if (status === 'running') {
-                yield { type: 'final', effector: finalEffector }
-            } else {
-                yield* Koka.readEffector(finalEffector) as Generator<Koka.Final, void>
-            }
-        }
+        yield* Koka.cleanUpGen(gen) as Generator<Koka.Final, void>
     }
 }
 
