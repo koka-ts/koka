@@ -367,6 +367,7 @@ export async function runAsync<E extends Async | AnyOpt | Final, Return>(
 
     try {
         const value = process(gen.next())
+        
         if (value instanceof Promise) {
             value.then(resolve, reject)
         } else {
@@ -377,7 +378,9 @@ export async function runAsync<E extends Async | AnyOpt | Final, Return>(
     }
 
     try {
-        return await promise
+        const value = await promise
+        debugger
+        return value
     } catch (error) {
         await runAsync(cleanUpGen(gen), {
             onCleanupErrors,

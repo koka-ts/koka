@@ -68,9 +68,9 @@ export type TaskResult<TaskReturn> = {
 
 export type TaskResultStream<TaskReturn> = AsyncIterableIterator<TaskResult<TaskReturn>, void, void>
 
-export type TaskResultsHandler<TaskReturn, HandlerReturn> = (
+export type TaskResultsHandler<TaskReturn, HandlerReturn, TaskYield extends Koka.AnyEff> = (
     stream: TaskResultStream<TaskReturn>,
-) => Promise<HandlerReturn>
+) => AsyncGenerator<TaskYield, HandlerReturn> | Promise<HandlerReturn>
 
 const createTaskConsumer = <TaskReturn, Yield extends Koka.AnyEff = never>(inputs: TaskSource<Yield, TaskReturn>) => {
     const producer: TaskProducer<Yield, TaskReturn> = typeof inputs === 'function' ? inputs : (index) => inputs[index]
@@ -99,19 +99,19 @@ const createTaskConsumer = <TaskReturn, Yield extends Koka.AnyEff = never>(input
     }
 }
 
-export function* series<TaskReturn, HandlerReturn, Yield extends Koka.AnyEff = never>(
+export function* series<TaskReturn, HandlerReturn, TaskYield extends Koka.AnyEff = never, Yield extends Koka.AnyEff = never>(
     inputs: TaskSource<Yield, TaskReturn>,
-    handler: TaskResultsHandler<TaskReturn, HandlerReturn>,
-): Generator<Yield | Async.Async | Koka.Final, HandlerReturn> {
+    handler: TaskResultsHandler<TaskReturn, HandlerReturn, TaskYield>,
+): Generator<Yield | TaskYield | Async.Async | Koka.Final, HandlerReturn> {
     return yield* concurrent(inputs, handler, {
         maxConcurrency: 1,
     })
 }
 
-export function* parallel<TaskReturn, HandlerReturn, Yield extends Koka.AnyEff = never>(
+export function* parallel<TaskReturn, HandlerReturn, TaskYield extends Koka.AnyEff = never, Yield extends Koka.AnyEff = never>(
     inputs: TaskSource<Yield, TaskReturn>,
-    handler: TaskResultsHandler<TaskReturn, HandlerReturn>,
-): Generator<Yield | Async.Async | Koka.Final, HandlerReturn> {
+    handler: TaskResultsHandler<TaskReturn, HandlerReturn, TaskYield>,
+): Generator<Yield | TaskYield | Async.Async | Koka.Final, HandlerReturn> {
     return yield* concurrent(inputs, handler, {
         maxConcurrency: Number.POSITIVE_INFINITY,
     })
@@ -121,11 +121,16 @@ export type ConcurrentOptions = {
     maxConcurrency?: number
 }
 
-export function* concurrent<TaskReturn, HandlerReturn, Yield extends Koka.AnyEff = never>(
+export function* concurrent<
+    TaskReturn,
+    HandlerReturn,
+    TaskYield extends Koka.AnyEff = never,
+    Yield extends Koka.AnyEff = never
+>(
     inputs: TaskSource<Yield, TaskReturn>,
-    handler: TaskResultsHandler<TaskReturn, HandlerReturn>,
+    handler: TaskResultsHandler<TaskReturn, HandlerReturn, TaskYield>,
     options?: ConcurrentOptions,
-): Generator<Async.Async | Yield | Koka.Final, HandlerReturn> {
+): Generator<Async.Async | Yield | TaskYield | Koka.Final, HandlerReturn> {
     const config = {
         maxConcurrency: Number.POSITIVE_INFINITY,
         ...options,
@@ -205,7 +210,11 @@ export function* concurrent<TaskReturn, HandlerReturn, Yield extends Koka.AnyEff
             status: 'start',
         }
 
-        yield* all(cleanups)
+        // yield* all(cleanups)
+
+        for (const cleanup of cleanups) {
+            yield* cleanup
+        }
 
         yield {
             type: 'final',
@@ -220,7 +229,10 @@ export function* concurrent<TaskReturn, HandlerReturn, Yield extends Koka.AnyEff
         const handlePromise = (promise: Promise<unknown>, item: ProcessItem) => {
             return promise.then(
                 (value) => {
-                    if ((hasHandlerResult || isCleaningUp) && item.finalCount === 0) {
+                    if (isCleaningUp) {
+                        return
+                    }
+                    if ((hasHandlerResult && item.finalCount === 0)) {
                         return
                     }
 
@@ -228,7 +240,10 @@ export function* concurrent<TaskReturn, HandlerReturn, Yield extends Koka.AnyEff
                     pendingTaskList.push(processItem(item, result))
                 },
                 (error: unknown) => {
-                    if ((hasHandlerResult || isCleaningUp) && item.finalCount === 0) {
+                    if (isCleaningUp) {
+                        return
+                    }
+                    if ((hasHandlerResult && item.finalCount === 0)) {
                         return
                     }
 
@@ -243,7 +258,10 @@ export function* concurrent<TaskReturn, HandlerReturn, Yield extends Koka.AnyEff
             result: IteratorResult<Yield, TaskReturn>,
         ): Generator<any, ProcessItem | undefined, any> {
             while (!result.done) {
-                if ((hasHandlerResult || isCleaningUp) && item.finalCount === 0) {
+                if (isCleaningUp) {
+                    return
+                }
+                if ((hasHandlerResult && item.finalCount === 0)) {
                     return
                 }
 
@@ -336,6 +354,9 @@ export function* concurrent<TaskReturn, HandlerReturn, Yield extends Koka.AnyEff
                 }
             }
         }
+
+        console.log('All tasks completed, closing stream')
+        debugger
 
         stream.done()
 
