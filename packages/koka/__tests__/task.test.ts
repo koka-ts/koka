@@ -383,7 +383,7 @@ describe('Task.concurrent', () => {
 
         const inputs = [valueGen(0), valueGen(1), valueGen(2), valueGen(3)]
         const handler = async (_stream: Task.TaskResultStream<number>) => {
-            // Early return without consuming all results
+            // Early return without consuming any results
             return 42
         }
 
