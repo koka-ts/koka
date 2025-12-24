@@ -4,42 +4,60 @@ import * as Koka from './koka.ts'
 import { withResolvers } from './util.ts'
 
 type StreamOptions<T> = {
-    onDone?: () => void
+    onDone: () => void
 }
 
-function createStream<T>(options?: StreamOptions<T>) {
-    const ctrl = {
-        next: withResolvers<'next'>(),
-        done: withResolvers<'done'>(),
-    }
+function createStream<T>(options: StreamOptions<T>) {
+    let ctrl: PromiseWithResolvers<void> = withResolvers()
 
-    const values = [] as T[]
+    let values = [] as T[]
+    let isDone = false
 
     const next = (value: T) => {
+        if (isDone) {
+            return
+        }
         values.push(value)
-        // Resolve the controller to allow the async generator to yield
-        const previousNext = ctrl.next
-        ctrl.next = withResolvers()
-        previousNext.resolve('next')
+
+        ctrl.resolve()
     }
 
     const done = () => {
-        ctrl.done.resolve('done')
+        if (isDone) {
+            return
+        }
+        isDone = true
+        ctrl.resolve()
+    }
+
+    const throwError = (error: unknown) => {
+        if (isDone) {
+            return
+        }
+        isDone = true
+        ctrl.reject(error)
     }
 
     async function* createAsyncGen() {
         try {
             while (true) {
-                const status = await Promise.race([ctrl.next.promise, ctrl.done.promise])
+                if (isDone) {
+                    return
+                }
 
-                while (values.length > 0) {
-                    const value = values.shift()!
+                await ctrl.promise
+
+                ctrl = withResolvers()
+
+                let count = 0
+
+                while (count < values.length) {
+                    const value = values[count++]
+
                     yield value
                 }
 
-                if (status === 'done') {
-                    return
-                }
+                values.length = 0
             }
         } finally {
             /**
@@ -47,7 +65,7 @@ function createStream<T>(options?: StreamOptions<T>) {
              * whether the async generator is aborted via early return/throw/break in for-await-of loop
              * or via ctrl.done.resolve('done')
              */
-            options?.onDone?.()
+            options.onDone()
         }
     }
 
@@ -56,6 +74,7 @@ function createStream<T>(options?: StreamOptions<T>) {
     return {
         next,
         done,
+        throw: throwError,
         gen,
     }
 }
@@ -153,208 +172,152 @@ export function* concurrent<
         throw new Error(`maxConcurrency must be greater than 0`)
     }
 
-    type ProcessingItem = {
-        type: 'initial'
+    type ActiveItem = {
         gen: Generator<Yield, TaskReturn>
         index: number
     }
 
-    type ProcessedItem = {
-        type: 'completed'
-        index: number
-        gen: Generator<Yield, TaskReturn>
+    const activeTasks = new Set<ActiveItem>()
+
+    let taskIndexCounter = 0
+
+    let jobQueue: Generator<Yield, void>[] = []
+
+    let signalResolvers: PromiseWithResolvers<void> | undefined
+    function notifyScheduler() {
+        signalResolvers = signalResolvers ?? withResolvers()
+        /**
+         * notify scheduler to wake up and process the next job
+         * multiple calls to notifyScheduler will be ignored
+         */
+        signalResolvers.resolve()
     }
-
-    type ProcessItem = ProcessingItem | ProcessedItem
-
-    const items = [] as ProcessItem[]
 
     const consumer = createTaskConsumer(inputs)
-
-    while (items.length < config.maxConcurrency) {
-        const gen = consumer.next()
-
-        if (!gen) {
-            break
-        }
-
-        items.push({
-            type: 'initial',
-            gen,
-            index: items.length,
-        })
-    }
-
-    let isCleaningUp = false
-    const cleanUpAllGen = function* (): Generator<Yield | Koka.Final | Async.Async, void> {
-        if (isCleaningUp) {
-            return
-        }
-
-        isCleaningUp = true
-
-        const cleanups = [] as Generator<Yield | Koka.Final | Async.Async, void>[]
-        // Clean up any remaining items
-        for (const item of items) {
-            if (item.type !== 'completed') {
-                const result: IteratorResult<Yield, TaskReturn> = (item.gen as any).return(undefined)
-                if (!result.done) {
-                    cleanups.push(Koka.cleanUpGen(item.gen, result))
-                }
-            }
-        }
-
-        if (cleanups.length === 0) {
-            return
-        }
-
-        if (cleanups.length === 1) {
-            yield* cleanups[0]
-            return
-        }
-
-        for (const cleanup of cleanups) {
-            yield* cleanup
-        }
-    }
-
-    const promiseMap: Map<ProcessItem, Promise<void>> = new Map()
-    const pendingItemProcessingList: Generator<Yield, void>[] = []
-
     let isStreamDone = false
     const stream = createStream<TaskResult<TaskReturn>>({
         onDone: () => {
             isStreamDone = true
+            notifyScheduler()
         },
     })
 
-    const resultPromise = handler(stream.gen)
+    let isCleaningUp = false
+    function* cleanUpAllGen(): Generator<Yield | Koka.Final | Async.Async, void> {
+        if (isCleaningUp) return
+        isCleaningUp = true
+        stream.done()
 
+        for (const item of activeTasks) {
+            yield* Koka.cleanUpGen(item.gen)
+        }
+    }
+
+    const resultPromise = handler(stream.gen)
     let isResultSettled = false
 
     resultPromise.then(
         () => {
             isResultSettled = true
+            notifyScheduler()
         },
         () => {
             isResultSettled = true
+            notifyScheduler()
         },
     )
 
-    const addPromise = (promise: Promise<unknown>, item: ProcessItem) => {
-        const newPromise = promise.then(
-            (value) => {
-                promiseMap.delete(item)
+    function handleAsyncEffect(promise: Promise<unknown>, item: ActiveItem) {
+        promise
+            .then(
+                (value) => {
+                    if (isCleaningUp || isStreamDone || isResultSettled) {
+                        return
+                    }
 
-                if (isCleaningUp || isStreamDone || isResultSettled) {
-                    return
-                }
-
-                const result = item.gen.next(value)
-                pendingItemProcessingList.push(processItem(item, result))
-            },
-            (error: unknown) => {
-                promiseMap.delete(item)
-
-                if (isCleaningUp || isStreamDone || isResultSettled) {
-                    return
-                }
-
-                const result = item.gen.throw(error)
-                pendingItemProcessingList.push(processItem(item, result))
-            },
-        )
-
-        promiseMap.set(item, newPromise)
-
-        return newPromise
+                    const nextStepGen = processItemStep(item, item.gen.next(value))
+                    jobQueue.push(nextStepGen)
+                },
+                (error) => {
+                    if (isCleaningUp || isStreamDone || isResultSettled) {
+                        return
+                    }
+                    const nextStepGen = processItemStep(item, item.gen.throw(error))
+                    jobQueue.push(nextStepGen)
+                },
+            )
+            .then(notifyScheduler, (error) => {
+                notifyScheduler()
+                stream.throw(error)
+            })
     }
 
-    const processItem = function* (
-        item: ProcessItem,
-        result: IteratorResult<Yield, TaskReturn>,
-    ): Generator<any, void, any> {
-        while (!result.done) {
-            const effect = result.value
-
-            if (effect.type === 'async') {
-                addPromise(effect.promise, item)
-                return
-            } else {
-                result = item.gen.next(yield effect)
+    function* processItemStep(item: ActiveItem, result: IteratorResult<Yield, TaskReturn>): Generator<Yield, void> {
+        try {
+            while (!result.done) {
+                const effect = result.value
+                if (effect.type === 'async') {
+                    handleAsyncEffect(effect.promise, item)
+                    return
+                } else {
+                    result = item.gen.next(yield effect)
+                }
             }
+        } catch (error) {
+            activeTasks.delete(item)
+            stream.throw(error)
+            return
         }
 
-        if (item.type === 'initial') {
-            const processedItem: ProcessedItem = {
-                type: 'completed',
-                index: item.index,
-                gen: item.gen,
-            }
-            items[item.index] = processedItem
-
-            stream.next({
-                index: item.index,
-                value: result.value,
-            })
-
-            const gen = consumer.next()
-
-            if (!gen) {
-                return
-            }
-
-            const newItem: ProcessItem = {
-                type: 'initial',
-                gen,
-                index: items.length,
-            }
-
-            items.push(newItem)
-        } else {
-            item.type satisfies 'completed'
-            throw new Error(
-                `Unexpected completion of item that was already completed: ${JSON.stringify(item, null, 2)}`,
-            )
-        }
+        activeTasks.delete(item)
+        stream.next({
+            index: item.index,
+            value: result.value,
+        })
     }
 
     function* process() {
-        let count = 0
-
-        /**
-         * why use while-loop instead of for-of loop?
-         * because every processItem call can cause a new item to be added to the items array
-         * which increases the length of the items array
-         * so here we use a while-loop to process the items incrementally
-         */
-        while (count < items.length) {
-            const item = items[count++]
-            yield* processItem(item, item.gen.next())
-        }
-
-        while (promiseMap.size > 0) {
-            yield* Async.await(Promise.race(promiseMap.values()))
-
-            while (pendingItemProcessingList.length > 0) {
-                const processingItem = pendingItemProcessingList.shift()!
-
-                yield* processingItem
+        while (true) {
+            if (isResultSettled || isStreamDone) {
+                break
             }
 
-            /**
-             * why repeat the same while-loop here?
-             * because processingItem call above can cause a new item to be added to the items array
-             * so we need to process the new items incrementally
-             */
-            while (count < items.length) {
-                const item = items[count++]
-                yield* processItem(item, item.gen.next())
+            if (jobQueue.length > 0) {
+                let i = 0
+                while (i < jobQueue.length) {
+                    const job = jobQueue[i++]
+                    yield* job
+                }
+                jobQueue.length = 0
             }
+
+            while (activeTasks.size < config.maxConcurrency) {
+                const gen = consumer.next()
+                if (!gen) {
+                    break
+                }
+
+                const newItem: ActiveItem = {
+                    gen,
+                    index: taskIndexCounter++,
+                }
+                activeTasks.add(newItem)
+
+                yield* processItemStep(newItem, newItem.gen.next())
+            }
+
+            if (activeTasks.size === 0) {
+                break
+            }
+
+            if (!signalResolvers) {
+                signalResolvers = withResolvers()
+                yield* Async.await(signalResolvers.promise)
+            }
+            signalResolvers = undefined
         }
 
         stream.done()
-
         return yield* Async.await(resultPromise)
     }
 

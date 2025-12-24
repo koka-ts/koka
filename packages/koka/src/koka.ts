@@ -82,9 +82,9 @@ export function getNativeError(error: unknown): Error {
 
 export function* cleanUpGen<Yield extends AnyEff, Return>(
     gen: Generator<Yield, Return>,
-    result: IteratorResult<Yield | Final, Return> = (gen as any).return(undefined),
+    result?: IteratorResult<Yield | Final, Return>,
 ): Generator<Yield | Final, void> {
-    if (result.done) {
+    if (result?.done) {
         return
     }
 
@@ -94,17 +94,19 @@ export function* cleanUpGen<Yield extends AnyEff, Return>(
     }
 
     try {
-        while (!result.done) {
-            const effect = result.value
+        let currentResult = result ?? (gen.return(undefined as any) as IteratorResult<Yield | Final, Return>)
+
+        while (!currentResult.done) {
+            const effect = currentResult.value
             if (effect.type === 'final') {
                 if (effect.status === 'start') {
-                    result = gen.next(finalState)
+                    currentResult = gen.next(finalState)
                 } else {
                     effect.status satisfies 'end'
-                    result = (gen as any).return(undefined)
+                    currentResult = (gen as any).return(undefined)
                 }
             } else {
-                result = gen.next(yield effect as any)
+                currentResult = gen.next(yield effect as any)
             }
         }
     } catch (error) {
@@ -229,7 +231,7 @@ function getAggregateErrorMessage(errors: Error[]): string {
     return errors.map((error) => error.stack ?? error.message).join('\n')
 }
 
-function printAggreErrorMessages(errors: Error[]): void {
+function printAggregateErrorMessages(errors: Error[]): void {
     const error = new AggregateError(errors, getAggregateErrorMessage(errors))
     console.log(error)
 }
@@ -247,7 +249,7 @@ export function runSync<E extends AnyOpt | Final, Return>(
         errors: [],
     }
     let finalCount = 0
-    const onCleanupErrors = options?.onCleanupErrors ?? printAggreErrorMessages
+    const onCleanupErrors = options?.onCleanupErrors ?? printAggregateErrorMessages
 
     let result = gen.next()
 
@@ -296,7 +298,7 @@ export async function runAsync<E extends Async | AnyOpt | Final, Return>(
 
     const gen = readEffector(effector)
     const { promise, resolve, reject } = withResolvers<Return>()
-    const onCleanupErrors = options?.onCleanupErrors ?? printAggreErrorMessages
+    const onCleanupErrors = options?.onCleanupErrors ?? printAggregateErrorMessages
     let finalState: FinalState = {
         errors: [],
     }
