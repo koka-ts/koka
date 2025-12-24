@@ -2668,3 +2668,459 @@ describe('Task methods with Koka finally behavior', () => {
         ])
     })
 })
+
+describe('stream.throw behavior and handler error capture', () => {
+    it('should allow handler to catch native exception via try-catch and return result', async () => {
+        /**
+         * When a task throws a native exception (throw new Error), stream.throw passes the error to the handler.
+         * The handler can catch this error via try-catch and handle it.
+         * Key point: After catching, concurrent returns the handler's return value normally instead of throwing.
+         */
+        const handlerActions: string[] = []
+
+        function* failingTask(): Generator<Async.Async, string> {
+            yield* Async.await(delayTime(10))
+            throw new Error('Task failed')
+        }
+
+        const handler = async (stream: Task.TaskResultStream<string>) => {
+            handlerActions.push('handler-start')
+            try {
+                for await (const { value } of stream) {
+                    handlerActions.push(`received: ${value}`)
+                }
+                handlerActions.push('stream-complete')
+            } catch (error) {
+                handlerActions.push(`caught: ${(error as Error).message}`)
+                return 'error-handled'
+            }
+            return 'normal-complete'
+        }
+
+        // When handler catches the stream.throw error, concurrent returns handler's return value normally
+        const result = await Koka.runAsync(Task.concurrent([failingTask()], handler))
+
+        expect(result).toBe('error-handled')
+        expect(handlerActions).toEqual(['handler-start', 'caught: Task failed'])
+    })
+
+    it('should propagate Err effect through Koka effect system, not stream.throw', async () => {
+        /**
+         * When a task yields an Err effect, it propagates through the Koka effect system (yield effect)
+         * rather than through stream.throw, so handler's try-catch won't catch it.
+         * This is the key difference between Err effects and native exceptions.
+         *
+         * Important: When Err effect propagates, the stream ends normally (not via exception).
+         * The handler completes normally, but the final result is Err.
+         */
+        class TaskError extends Err.Err('TaskError')<string> {}
+
+        const handlerActions: string[] = []
+
+        function* failingTask() {
+            yield* Async.await(delayTime(10))
+            yield* Err.throw(new TaskError('task error message'))
+            return 'should not reach'
+        }
+
+        const handler = async (stream: Task.TaskResultStream<string>) => {
+            handlerActions.push('handler-start')
+            try {
+                for await (const { value } of stream) {
+                    handlerActions.push(`received: ${value}`)
+                }
+            } catch (error) {
+                // Err effect won't trigger this catch block
+                handlerActions.push('caught-error')
+            }
+            handlerActions.push('handler-end')
+            return 'done'
+        }
+
+        const result = await Result.runAsync(Task.concurrent([failingTask()], handler))
+
+        // Err effect propagates through Koka effect system, final result is Err
+        expect(result).toEqual({
+            type: 'err',
+            name: 'TaskError',
+            error: 'task error message',
+        })
+        // Handler's try-catch didn't catch the Err effect (because it doesn't go through stream.throw)
+        // Stream ends normally, handler completes normally
+        expect(handlerActions).toEqual(['handler-start', 'handler-end'])
+        // Note: No 'caught-error', and no 'received: ...'
+    })
+
+    it('should demonstrate fail-fast behavior with native exceptions', async () => {
+        /**
+         * Fail-fast behavior of stream.throw:
+         * When the first task throws a native exception, stream ends immediately.
+         * Handler can catch the error, other tasks will be cleaned up.
+         */
+        const taskActions: string[] = []
+        const cleanupActions: string[] = []
+
+        function* fastFailingTask(): Generator<Async.Async, string> {
+            taskActions.push('fast-failing-start')
+            yield* Async.await(delayTime(10))
+            taskActions.push('fast-failing-throw')
+            throw new Error('Fast fail')
+        }
+
+        function* slowTask(): Generator<Async.Async, string> {
+            try {
+                taskActions.push('slow-start')
+                yield* Async.await(delayTime(100))
+                taskActions.push('slow-end') // Should not reach here
+                return 'slow-result'
+            } finally {
+                cleanupActions.push('slow-cleanup')
+            }
+        }
+
+        const handler = async (stream: Task.TaskResultStream<string>) => {
+            const results: string[] = []
+            try {
+                for await (const { value } of stream) {
+                    results.push(value)
+                }
+            } catch (error) {
+                // Catch native exception
+                return { error: (error as Error).message, results }
+            }
+            return { error: null, results }
+        }
+
+        const result = await Koka.runAsync(Task.concurrent([fastFailingTask(), slowTask()], handler))
+
+        // Handler caught the error, concurrent returns normally
+        expect(result).toEqual({ error: 'Fast fail', results: [] })
+
+        // Verify fail-fast behavior
+        expect(taskActions).toContain('fast-failing-start')
+        expect(taskActions).toContain('slow-start')
+        expect(taskActions).not.toContain('slow-end') // Slow task was interrupted
+        expect(cleanupActions).toContain('slow-cleanup') // But cleanup logic was executed
+    })
+
+    it('should demonstrate limitation: native exceptions can be handled but allSettled needs workaround', async () => {
+        /**
+         * For native exceptions, handler can catch them.
+         * But once stream.throw is called, the stream ends.
+         * Cannot continue collecting results from other tasks.
+         * Need to use task-level error handling to implement allSettled.
+         */
+        const taskResults: Array<{ status: 'fulfilled' | 'rejected'; value?: string; reason?: string }> = []
+
+        function* successTask(id: number): Generator<Async.Async, string> {
+            yield* Async.await(delayTime(20))
+            return `success-${id}`
+        }
+
+        function* failTask(): Generator<Async.Async, string> {
+            yield* Async.await(delayTime(10))
+            throw new Error('Task failed')
+        }
+
+        const handler = async (stream: Task.TaskResultStream<string>) => {
+            try {
+                for await (const { index, value } of stream) {
+                    taskResults[index] = { status: 'fulfilled', value }
+                }
+            } catch (error) {
+                // With current design, we can only know "an error occurred"
+                // But cannot know which task failed, nor continue collecting other task results
+                taskResults.push({ status: 'rejected', reason: (error as Error).message })
+            }
+            return taskResults
+        }
+
+        const result = await Koka.runAsync(Task.concurrent([successTask(0), failTask(), successTask(2)], handler))
+
+        // Handler caught the error, returned partial results
+        expect(result.some((r) => r.status === 'rejected')).toBe(true)
+        // Due to fail-fast, successful tasks may not have a chance to complete
+    })
+
+    it('should demonstrate limitation: cannot implement some/any with stream-level error handling', async () => {
+        /**
+         * Limitation of current design:
+         * Native exceptions can be caught by handler, but stream ends immediately.
+         * Cannot implement "N successes are enough, ignore failures" some/any semantics.
+         * Need to use task-level error handling.
+         */
+        const completedTasks: string[] = []
+
+        function* mayFailTask(id: number, shouldFail: boolean): Generator<Async.Async, string> {
+            yield* Async.await(delayTime(10 * (id + 1)))
+            if (shouldFail) {
+                throw new Error(`Task ${id} failed`)
+            }
+            return `task-${id}`
+        }
+
+        const handler = async (stream: Task.TaskResultStream<string>) => {
+            try {
+                for await (const { value } of stream) {
+                    completedTasks.push(value)
+                    if (completedTasks.length >= 2) {
+                        return { success: true, results: completedTasks }
+                    }
+                }
+            } catch {
+                // Catch error, but cannot continue execution
+            }
+            return { success: false, results: completedTasks }
+        }
+
+        // First task completes fastest but will fail
+        const result = await Koka.runAsync(
+            Task.concurrent(
+                [
+                    mayFailTask(0, true), // 10ms, fails
+                    mayFailTask(1, false), // 20ms, succeeds
+                    mayFailTask(2, false), // 30ms, succeeds
+                ],
+                handler,
+            ),
+        )
+
+        // Handler caught the error, returned failure result
+        expect(result.success).toBe(false)
+        // Due to fail-fast, even though 2 tasks would succeed, we cannot collect them
+        expect(completedTasks.length).toBe(0)
+    })
+
+    it('should handle multiple native exceptions - only first error reaches handler', async () => {
+        /**
+         * When multiple tasks throw native exceptions simultaneously, only the first error is reported to handler.
+         * Subsequent errors are ignored (because stream has already ended).
+         */
+        const errorMessages: string[] = []
+
+        function* failingTask(id: number, delay: number): Generator<Async.Async, string> {
+            yield* Async.await(delayTime(delay))
+            throw new Error(`Error from task ${id}`)
+        }
+
+        const handler = async (stream: Task.TaskResultStream<string>) => {
+            try {
+                for await (const { value } of stream) {
+                    // Should not reach here
+                }
+            } catch (error) {
+                errorMessages.push((error as Error).message)
+            }
+            return 'done'
+        }
+
+        const result = await Koka.runAsync(
+            Task.concurrent([failingTask(0, 10), failingTask(1, 10), failingTask(2, 10)], handler),
+        )
+
+        // Handler caught the first error, concurrent returns normally
+        expect(result).toBe('done')
+        // Only one error was caught by handler
+        expect(errorMessages.length).toBe(1)
+        expect(errorMessages[0]).toMatch(/Error from task [012]/)
+    })
+
+    it('should properly cleanup other tasks when stream.throw is called', async () => {
+        /**
+         * When stream.throw is called, other running tasks should be properly cleaned up.
+         */
+        const taskStates: Record<number, { started: boolean; cleaned: boolean }> = {
+            0: { started: false, cleaned: false },
+            1: { started: false, cleaned: false },
+            2: { started: false, cleaned: false },
+        }
+
+        function* taskWithCleanup(id: number, delay: number, shouldFail: boolean): Generator<Async.Async, string> {
+            taskStates[id].started = true
+            try {
+                yield* Async.await(delayTime(delay))
+                if (shouldFail) {
+                    throw new Error(`Task ${id} failed`)
+                }
+                return `task-${id}`
+            } finally {
+                taskStates[id].cleaned = true
+            }
+        }
+
+        const handler = async (stream: Task.TaskResultStream<string>) => {
+            const results: string[] = []
+            for await (const { value } of stream) {
+                results.push(value)
+            }
+            return results
+        }
+
+        await expect(
+            Koka.runAsync(
+                Task.concurrent(
+                    [
+                        taskWithCleanup(0, 50, false),
+                        taskWithCleanup(1, 10, true), // Fastest to complete but fails
+                        taskWithCleanup(2, 50, false),
+                    ],
+                    handler,
+                ),
+            ),
+        ).rejects.toThrow('Task 1 failed')
+
+        // Verify all tasks were cleaned up
+        expect(taskStates[0].started).toBe(true)
+        expect(taskStates[0].cleaned).toBe(true)
+        expect(taskStates[1].started).toBe(true)
+        expect(taskStates[1].cleaned).toBe(true)
+        expect(taskStates[2].started).toBe(true)
+        expect(taskStates[2].cleaned).toBe(true)
+    })
+
+    it('should handle stream.throw with Err effect and Result.runAsync', async () => {
+        /**
+         * Using Result.runAsync can elegantly handle Err effects.
+         * But stream.throw behavior remains: once an error occurs, stream ends.
+         */
+        class ApiError extends Err.Err('ApiError')<{ code: number; message: string }> {}
+
+        function* apiCall(id: number, shouldFail: boolean) {
+            yield* Async.await(delayTime(10))
+            if (shouldFail) {
+                yield* Err.throw(new ApiError({ code: 500, message: `API ${id} failed` }))
+            }
+            return { id, data: `response-${id}` }
+        }
+
+        const handler = async (stream: Task.TaskResultStream<{ id: number; data: string }>) => {
+            const results: Array<{ id: number; data: string }> = []
+            for await (const { value } of stream) {
+                results.push(value)
+            }
+            return results
+        }
+
+        const result = await Result.runAsync(
+            Task.concurrent([apiCall(0, false), apiCall(1, true), apiCall(2, false)], handler),
+        )
+
+        // Result.runAsync converts error to Result type
+        expect(result).toEqual({
+            type: 'err',
+            name: 'ApiError',
+            error: { code: 500, message: 'API 1 failed' },
+        })
+    })
+
+    it('should demonstrate workaround: handle errors at task level for allSettled behavior', async () => {
+        /**
+         * Workaround: Handle errors at task level instead of letting them propagate to stream.
+         * This way we can achieve allSettled-like behavior.
+         */
+        type SettledResult<T> = { status: 'fulfilled'; value: T } | { status: 'rejected'; reason: string }
+
+        function* wrapTask<T>(task: Generator<Async.Async, T>): Generator<Async.Async, SettledResult<T>> {
+            try {
+                const value = yield* task
+                return { status: 'fulfilled', value }
+            } catch (error) {
+                return { status: 'rejected', reason: (error as Error).message }
+            }
+        }
+
+        function* mayFailTask(id: number, shouldFail: boolean): Generator<Async.Async, string> {
+            yield* Async.await(delayTime(10))
+            if (shouldFail) {
+                throw new Error(`Task ${id} failed`)
+            }
+            return `success-${id}`
+        }
+
+        const handler = async (stream: Task.TaskResultStream<SettledResult<string>>) => {
+            const results: Array<SettledResult<string>> = []
+            for await (const { index, value } of stream) {
+                results[index] = value
+            }
+            return results
+        }
+
+        // Use wrapTask to wrap each task, converting errors to results
+        const result = await Koka.runAsync(
+            Task.concurrent(
+                [wrapTask(mayFailTask(0, false)), wrapTask(mayFailTask(1, true)), wrapTask(mayFailTask(2, false))],
+                handler,
+            ),
+        )
+
+        // Now we can collect all results, including failures
+        expect(result).toEqual([
+            { status: 'fulfilled', value: 'success-0' },
+            { status: 'rejected', reason: 'Task 1 failed' },
+            { status: 'fulfilled', value: 'success-2' },
+        ])
+    })
+
+    it('should demonstrate workaround: implement some/any with task-level error handling', async () => {
+        /**
+         * Workaround: Use task-level error handling to implement some/any semantics.
+         */
+        type MaybeResult<T> = { ok: true; value: T } | { ok: false; error: string }
+
+        function* wrapTask<T>(task: Generator<Async.Async, T>): Generator<Async.Async, MaybeResult<T>> {
+            try {
+                const value = yield* task
+                return { ok: true, value }
+            } catch (error) {
+                return { ok: false, error: (error as Error).message }
+            }
+        }
+
+        function* unreliableTask(id: number): Generator<Async.Async, string> {
+            yield* Async.await(delayTime(10 * (id + 1)))
+            if (id === 0 || id === 2) {
+                throw new Error(`Task ${id} failed`)
+            }
+            return `success-${id}`
+        }
+
+        // Implement "at least N successes" semantics
+        const handler = async (stream: Task.TaskResultStream<MaybeResult<string>>) => {
+            const successes: string[] = []
+            const failures: string[] = []
+            const requiredSuccesses = 2
+
+            for await (const { value } of stream) {
+                if (value.ok) {
+                    successes.push(value.value)
+                    if (successes.length >= requiredSuccesses) {
+                        return { successes, failures }
+                    }
+                } else {
+                    failures.push(value.error)
+                }
+            }
+
+            if (successes.length >= requiredSuccesses) {
+                return { successes, failures }
+            }
+
+            throw new Error(`Only ${successes.length} succeeded, need ${requiredSuccesses}`)
+        }
+
+        const result = await Koka.runAsync(
+            Task.concurrent(
+                [
+                    wrapTask(unreliableTask(0)), // fails
+                    wrapTask(unreliableTask(1)), // succeeds
+                    wrapTask(unreliableTask(2)), // fails
+                    wrapTask(unreliableTask(3)), // succeeds
+                ],
+                handler,
+            ),
+        )
+
+        expect(result.successes).toEqual(['success-1', 'success-3'])
+        expect(result.failures).toContain('Task 0 failed')
+    })
+})

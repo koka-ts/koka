@@ -184,13 +184,13 @@ export function* concurrent<
     let jobQueue: Generator<Yield, void>[] = []
 
     let signalResolvers: PromiseWithResolvers<void> | undefined
+    let hasNotified = false
     function notifyScheduler() {
-        signalResolvers = signalResolvers ?? withResolvers()
-        /**
-         * notify scheduler to wake up and process the next job
-         * multiple calls to notifyScheduler will be ignored
-         */
-        signalResolvers.resolve()
+        if (hasNotified) {
+            return
+        }
+        hasNotified = true
+        signalResolvers?.resolve()
     }
 
     const consumer = createTaskConsumer(inputs)
@@ -283,12 +283,11 @@ export function* concurrent<
             }
 
             if (jobQueue.length > 0) {
-                let i = 0
-                while (i < jobQueue.length) {
-                    const job = jobQueue[i++]
+                const currentJobQueue = jobQueue
+                jobQueue = []
+                for (const job of currentJobQueue) {
                     yield* job
                 }
-                jobQueue.length = 0
             }
 
             while (activeTasks.size < config.maxConcurrency) {
@@ -310,11 +309,13 @@ export function* concurrent<
                 break
             }
 
-            if (!signalResolvers) {
+            if (hasNotified) {
+                hasNotified = false
+            } else {
                 signalResolvers = withResolvers()
                 yield* Async.await(signalResolvers.promise)
+                signalResolvers = undefined
             }
-            signalResolvers = undefined
         }
 
         stream.done()
