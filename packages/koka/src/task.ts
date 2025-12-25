@@ -3,99 +3,71 @@ import * as Gen from './gen.ts'
 import * as Koka from './koka.ts'
 import { withResolvers } from './util.ts'
 
-type StreamOptions<T> = {
-    onDone: () => void
-}
+export type TaskProducer<TaskReturn, TaskYield extends Koka.AnyEff = never> = (
+    index: number,
+) => Koka.Effector<TaskYield, TaskReturn> | undefined
 
-function createStream<T>(options: StreamOptions<T>) {
-    let ctrl: PromiseWithResolvers<void> = withResolvers()
+export type TaskSource<TaskReturn, TaskYield extends Koka.AnyEff = never> =
+    | TaskProducer<TaskReturn, TaskYield>
+    | Iterable<Koka.Effector<TaskYield, TaskReturn>>
 
-    let values = [] as T[]
-    let isDone = false
-
-    const next = (value: T) => {
-        if (isDone) {
-            return
-        }
-        values.push(value)
-
-        ctrl.resolve()
-    }
-
-    const done = () => {
-        if (isDone) {
-            return
-        }
-        isDone = true
-        ctrl.resolve()
-    }
-
-    const throwError = (error: unknown) => {
-        if (isDone) {
-            return
-        }
-        isDone = true
-        ctrl.reject(error)
-    }
-
-    async function* createAsyncGen() {
-        try {
-            while (true) {
-                if (isDone) {
-                    return
-                }
-
-                await ctrl.promise
-
-                ctrl = withResolvers()
-
-                let count = 0
-
-                while (count < values.length) {
-                    const value = values[count++]
-
-                    yield value
-                }
-
-                values.length = 0
-            }
-        } finally {
-            /**
-             * ensure onDone is called even if the stream is aborted
-             * whether the async generator is aborted via early return/throw/break in for-await-of loop
-             * or via ctrl.done.resolve('done')
-             */
-            options.onDone()
-        }
-    }
-
-    const gen = createAsyncGen()
-
-    return {
-        next,
-        done,
-        throw: throwError,
-        gen,
-    }
-}
-
-export type TaskProducer<Yield, TaskReturn> = (index: number) => Koka.Effector<Yield, TaskReturn> | undefined
-
-export type TaskSource<Yield, TaskReturn> = TaskProducer<Yield, TaskReturn> | Array<Koka.Effector<Yield, TaskReturn>>
-
-export type TaskResult<TaskReturn> = {
+export type TaskResultOk<TaskReturn> = {
+    type: 'task-ok'
     index: number
     value: TaskReturn
 }
 
-export type TaskResultStream<TaskReturn> = AsyncIterableIterator<TaskResult<TaskReturn>, void, void>
+export type TaskResultErr = {
+    type: 'task-err'
+    index: number
+    error: unknown
+}
 
-export type TaskResultsHandler<TaskReturn, HandlerReturn, TaskYield extends Koka.AnyEff> = (
+export type TaskResult<TaskReturn> = TaskResultOk<TaskReturn> | TaskResultErr
+
+export type TaskWaitNext<TaskReturn> = {
+    type: 'task-wait-next'
+    expect?: TaskResultOk<TaskReturn>
+}
+
+export type TaskWaitResult<TaskReturn> = {
+    type: 'task-wait-result'
+    expect?: TaskResult<TaskReturn>
+}
+
+export type TaskWait<TaskReturn> = TaskWaitNext<TaskReturn> | TaskWaitResult<TaskReturn>
+
+export const TaskEnd = Symbol('TaskEnd')
+
+export type TaskResultStream<TaskReturn> = {
+    next: () => Generator<TaskWaitNext<TaskReturn>, TaskResultOk<TaskReturn> | typeof TaskEnd>
+    result: () => Generator<TaskWaitResult<TaskReturn>, TaskResult<TaskReturn> | typeof TaskEnd>
+}
+
+export type StreamReducerEff<TaskReturn> = Koka.AnyEff | TaskWait<TaskReturn>
+
+export type TaskStreamReducer<TaskReturn, ReducerReturn, ReducerYield extends StreamReducerEff<TaskReturn> = never> = (
     stream: TaskResultStream<TaskReturn>,
-) => Promise<HandlerReturn>
+) => Generator<ReducerYield, ReducerReturn>
 
-const createTaskConsumer = <TaskReturn, Yield extends Koka.AnyEff = never>(inputs: TaskSource<Yield, TaskReturn>) => {
-    const producer: TaskProducer<Yield, TaskReturn> = typeof inputs === 'function' ? inputs : (index) => inputs[index]
+function iteratorToProducer<TaskReturn, TaskYield extends Koka.AnyEff = never>(
+    inputs: Iterable<Koka.Effector<TaskYield, TaskReturn>>,
+): TaskProducer<TaskReturn, TaskYield> {
+    const iterator = inputs[Symbol.iterator]()
+    return () => {
+        const result = iterator.next()
+        if (result.done) {
+            return
+        }
+        return result.value
+    }
+}
+
+const createTaskProvider = <TaskReturn, TaskYield extends Koka.AnyEff = never>(
+    inputs: TaskSource<TaskReturn, TaskYield>,
+) => {
+    const producer: TaskProducer<TaskReturn, TaskYield> =
+        typeof inputs === 'function' ? inputs : iteratorToProducer(inputs)
 
     let count = 0
     let noTask = false
@@ -123,30 +95,96 @@ const createTaskConsumer = <TaskReturn, Yield extends Koka.AnyEff = never>(input
 
 export function* series<
     TaskReturn,
-    HandlerReturn,
+    ReducerReturn,
     TaskYield extends Koka.AnyEff = never,
-    Yield extends Koka.AnyEff = never,
+    ReducerYield extends StreamReducerEff<TaskReturn> = never,
 >(
-    inputs: TaskSource<Yield, TaskReturn>,
-    handler: TaskResultsHandler<TaskReturn, HandlerReturn, TaskYield>,
-): Generator<Yield | TaskYield | Async.Async | Koka.Final, HandlerReturn> {
-    return yield* concurrent(inputs, handler, {
+    inputs: TaskSource<TaskReturn, TaskYield>,
+    reducer: TaskStreamReducer<TaskReturn, ReducerReturn, TaskYield>,
+): Generator<ReducerYield | TaskYield | Async.Async | Koka.Final, ReducerReturn> {
+    return yield* concurrent(inputs, reducer, {
         maxConcurrency: 1,
     })
 }
 
 export function* parallel<
     TaskReturn,
-    HandlerReturn,
+    ReducerReturn,
     TaskYield extends Koka.AnyEff = never,
-    Yield extends Koka.AnyEff = never,
+    ReducerYield extends StreamReducerEff<TaskReturn> = never,
 >(
-    inputs: TaskSource<Yield, TaskReturn>,
-    handler: TaskResultsHandler<TaskReturn, HandlerReturn, TaskYield>,
-): Generator<Yield | TaskYield | Async.Async | Koka.Final, HandlerReturn> {
+    inputs: TaskSource<TaskReturn, TaskYield>,
+    handler: TaskStreamReducer<TaskReturn, ReducerReturn, TaskYield>,
+): Generator<ReducerYield | TaskYield | Async.Async | Koka.Final, ReducerReturn> {
     return yield* concurrent(inputs, handler, {
         maxConcurrency: Number.POSITIVE_INFINITY,
     })
+}
+
+const errorTaskIndexWeakMap = new WeakMap<Error, number>()
+
+/**
+ * Get the task index from an error thrown by a concurrent task.
+ * Returns undefined if the error is not an Error instance or was not thrown by a task.
+ */
+export function getTaskIndexFromError(error: unknown) {
+    if (error instanceof Error) {
+        return errorTaskIndexWeakMap.get(error)
+    }
+}
+
+export function* drain<Yield extends Koka.AnyEff, Return>(inputs: TaskSource<Return, Yield>) {
+    yield* concurrent(inputs, function* (stream) {
+        while (true) {
+            const result = yield* stream.result()
+            if (result === TaskEnd) {
+                break
+            }
+        }
+    })
+}
+
+type TaskResultLinkList<TaskReturn> = {
+    value: TaskResult<TaskReturn>
+    next: TaskResultLinkList<TaskReturn> | undefined
+}
+
+class TaskResultLinkListManager<TaskReturn> {
+    private tail: TaskResultLinkList<TaskReturn> | undefined = undefined
+    private head: TaskResultLinkList<TaskReturn> | undefined = undefined
+
+    add(value: TaskResult<TaskReturn>) {
+        const link: TaskResultLinkList<TaskReturn> = {
+            value,
+            next: undefined,
+        }
+
+        if (this.tail) {
+            this.tail.next = link
+            this.tail = link
+        } else {
+            // Queue was empty
+            this.head = link
+            this.tail = link
+        }
+    }
+
+    next(): TaskResult<TaskReturn> | undefined {
+        if (!this.head) {
+            return undefined
+        }
+
+        const result = this.head.value
+        this.head = this.head.next
+
+        // If head becomes empty, tail must also be cleared to prevent stale reference
+        // and correctly handle the next 'add' logic
+        if (!this.head) {
+            this.tail = undefined
+        }
+
+        return result
+    }
 }
 
 export type ConcurrentOptions = {
@@ -155,14 +193,14 @@ export type ConcurrentOptions = {
 
 export function* concurrent<
     TaskReturn,
-    HandlerReturn,
+    ReducerReturn,
     TaskYield extends Koka.AnyEff = never,
-    Yield extends Koka.AnyEff = never,
+    ReducerYield extends StreamReducerEff<TaskReturn> = never,
 >(
-    inputs: TaskSource<Yield, TaskReturn>,
-    handler: TaskResultsHandler<TaskReturn, HandlerReturn, TaskYield>,
+    inputs: TaskSource<TaskReturn, TaskYield>,
+    reducer: TaskStreamReducer<TaskReturn, ReducerReturn, ReducerYield>,
     options?: ConcurrentOptions,
-): Generator<Async.Async | Yield | TaskYield | Koka.Final, HandlerReturn> {
+): Generator<Async.Async | TaskYield | Exclude<ReducerYield, TaskWait<TaskReturn>> | Koka.Final, ReducerReturn> {
     const config = {
         maxConcurrency: Number.POSITIVE_INFINITY,
         ...options,
@@ -172,16 +210,7 @@ export function* concurrent<
         throw new Error(`maxConcurrency must be greater than 0`)
     }
 
-    type ActiveItem = {
-        gen: Generator<Yield, TaskReturn>
-        index: number
-    }
-
-    const activeTasks = new Set<ActiveItem>()
-
-    let taskIndexCounter = 0
-
-    let jobQueue: Generator<Yield, void>[] = []
+    const activeTasksMap = new Map<number, Generator<TaskYield, TaskReturn>>()
 
     let signalResolvers: PromiseWithResolvers<void> | undefined
     let hasNotified = false
@@ -193,146 +222,227 @@ export function* concurrent<
         signalResolvers?.resolve()
     }
 
-    const consumer = createTaskConsumer(inputs)
-    let isStreamDone = false
-    const stream = createStream<TaskResult<TaskReturn>>({
-        onDone: () => {
-            isStreamDone = true
-            notifyScheduler()
-        },
-    })
+    const taskProvider = createTaskProvider(inputs)
 
-    let isCleaningUp = false
-    function* cleanUpAllGen(): Generator<Yield | Koka.Final | Async.Async, void> {
-        if (isCleaningUp) return
-        isCleaningUp = true
-        stream.done()
-
-        for (const item of activeTasks) {
-            yield* Koka.cleanUpGen(item.gen)
+    function* cleanUpAllGen(): Generator<TaskYield | Koka.Final | Async.Async, void> {
+        if (activeTasksMap.size === 0) {
+            return
         }
+
+        const cleanUpTasks = [] as Generator<TaskYield | Koka.Final, void>[]
+
+        for (const gen of activeTasksMap.values()) {
+            cleanUpTasks.push(Koka.cleanUpGen(gen))
+        }
+
+        yield* drain(cleanUpTasks)
     }
 
-    const resultPromise = handler(stream.gen)
-    let isResultSettled = false
+    let isEnded = false
 
-    resultPromise.then(
-        () => {
-            isResultSettled = true
-            notifyScheduler()
+    const stream: TaskResultStream<TaskReturn> = {
+        *next() {
+            if (isEnded) {
+                return TaskEnd
+            }
+
+            const result: TaskResultOk<TaskReturn> = yield {
+                type: 'task-wait-next',
+            } satisfies TaskWaitNext<TaskReturn>
+
+            return result
         },
-        () => {
-            isResultSettled = true
-            notifyScheduler()
+        *result() {
+            if (isEnded) {
+                return TaskEnd
+            }
+
+            const result: TaskResult<TaskReturn> = yield {
+                type: 'task-wait-result',
+            } satisfies TaskWaitResult<TaskReturn>
+
+            return result
         },
-    )
+    }
 
-    function handleAsyncEffect(promise: Promise<unknown>, item: ActiveItem) {
-        promise
-            .then(
-                (value) => {
-                    if (isCleaningUp || isStreamDone || isResultSettled) {
-                        return
-                    }
+    let jobQueue: (() => ReturnType<typeof processTask>)[] = []
 
-                    const nextStepGen = processItemStep(item, item.gen.next(value))
-                    jobQueue.push(nextStepGen)
-                },
-                (error) => {
-                    if (isCleaningUp || isStreamDone || isResultSettled) {
-                        return
-                    }
-                    const nextStepGen = processItemStep(item, item.gen.throw(error))
-                    jobQueue.push(nextStepGen)
-                },
-            )
-            .then(notifyScheduler, (error) => {
+    let asyncCount = 0
+
+    function handleAsyncEffect(index: number, gen: Generator<TaskYield, TaskReturn>, promise: Promise<unknown>) {
+        asyncCount++
+        promise.then(
+            (value) => {
+                asyncCount--
+                jobQueue.push(() => processTask(index, gen, gen.next(value)))
                 notifyScheduler()
-                stream.throw(error)
-            })
+            },
+            (error: unknown) => {
+                asyncCount--
+                jobQueue.push(() => processTask(index, gen, gen.throw(error)))
+                notifyScheduler()
+            },
+        )
     }
 
-    function* processItemStep(item: ActiveItem, result: IteratorResult<Yield, TaskReturn>): Generator<Yield, void> {
+    const taskResultManager = new TaskResultLinkListManager<TaskReturn>()
+
+    function* processTask(
+        index: number,
+        gen: Generator<TaskYield, TaskReturn>,
+        result: IteratorResult<TaskYield, TaskReturn>,
+    ): Generator<TaskYield, void> {
         try {
             while (!result.done) {
                 const effect = result.value
                 if (effect.type === 'async') {
-                    handleAsyncEffect(effect.promise, item)
+                    handleAsyncEffect(index, gen, effect.promise)
                     return
                 } else {
-                    result = item.gen.next(yield effect)
+                    result = gen.next(yield effect)
                 }
             }
         } catch (error) {
-            activeTasks.delete(item)
-            stream.throw(error)
+            activeTasksMap.delete(index)
+            taskResultManager.add({
+                type: 'task-err',
+                index,
+                error,
+            })
             return
         }
 
-        activeTasks.delete(item)
-        stream.next({
-            index: item.index,
-            value: result.value,
+        result.done satisfies true
+        activeTasksMap.delete(index)
+        taskResultManager.add({
+            type: 'task-ok',
+            index,
+            value: result.value as TaskReturn,
         })
     }
 
-    function* process() {
-        while (true) {
-            if (isResultSettled || isStreamDone) {
-                break
+    let taskIndexCounter = 0
+
+    function* process(): Generator<
+        Async.Async | TaskYield | Exclude<ReducerYield, TaskWait<TaskReturn>> | Koka.Final,
+        ReducerReturn
+    > {
+        const reducerGen = reducer(stream)
+        let result = reducerGen.next()
+
+        mainLoop: while (!result.done) {
+            const effect = result.value
+
+            if (effect.type !== 'task-wait-next' && effect.type !== 'task-wait-result') {
+                result = reducerGen.next(yield effect as Exclude<ReducerYield, TaskWait<TaskReturn>>)
+                continue
+            }
+
+            if (isEnded) {
+                throw new Error(
+                    `Unexpected calling stream.${
+                        effect.type === 'task-wait-next' ? 'next' : 'result'
+                    }() when stream is ended`,
+                )
             }
 
             if (jobQueue.length > 0) {
                 const currentJobQueue = jobQueue
                 jobQueue = []
+
                 for (const job of currentJobQueue) {
-                    yield* job
+                    yield* job()
                 }
             }
 
-            while (activeTasks.size < config.maxConcurrency) {
-                const gen = consumer.next()
+            while (true) {
+                const taskResult = taskResultManager.next()
+
+                if (!taskResult) {
+                    break
+                }
+
+                if (effect.type === 'task-wait-next') {
+                    if (taskResult.type === 'task-ok') {
+                        result = reducerGen.next(taskResult)
+                    } else {
+                        if (taskResult.error instanceof Error) {
+                            errorTaskIndexWeakMap.set(taskResult.error, taskResult.index)
+                            result = reducerGen.throw(taskResult.error)
+                        } else {
+                            // Wrap non-Error values
+                            const wrappedError = new Error(JSON.stringify(taskResult.error, null, 2), {
+                                cause: taskResult.error,
+                            })
+
+                            errorTaskIndexWeakMap.set(wrappedError, taskResult.index)
+                            result = reducerGen.throw(wrappedError)
+                        }
+                    }
+                } else {
+                    effect.type satisfies 'task-wait-result'
+                    result = reducerGen.next(taskResult)
+                }
+
+                if (result.done) {
+                    return result.value
+                }
+
+                if (result.value.type !== 'task-wait-next' && result.value.type !== 'task-wait-result') {
+                    continue mainLoop
+                }
+            }
+
+            while (activeTasksMap.size < config.maxConcurrency) {
+                const gen = taskProvider.next()
                 if (!gen) {
                     break
                 }
 
-                const newItem: ActiveItem = {
-                    gen,
-                    index: taskIndexCounter++,
-                }
-                activeTasks.add(newItem)
+                const index = taskIndexCounter++
+                activeTasksMap.set(index, gen)
 
-                yield* processItemStep(newItem, newItem.gen.next())
+                yield* processTask(index, gen, gen.next())
             }
 
-            if (activeTasks.size === 0) {
-                break
+            if (activeTasksMap.size === 0) {
+                isEnded = true
+                result = reducerGen.next(TaskEnd)
+                continue
             }
 
             if (hasNotified) {
                 hasNotified = false
             } else {
+                if (asyncCount === 0) {
+                    throw new Error(`Unexpected status: no async tasks and no tasks in queue`)
+                }
                 signalResolvers = withResolvers()
                 yield* Async.await(signalResolvers.promise)
                 signalResolvers = undefined
             }
         }
 
-        stream.done()
-        return yield* Async.await(resultPromise)
+        return result.value
     }
 
     return yield* Koka.try(process).finally(cleanUpAllGen)
 }
 
+export interface TupleOptions extends ConcurrentOptions {}
+
 export function* tuple<T extends unknown[] | readonly unknown[]>(
     inputs: T,
+    options?: TupleOptions,
 ): Generator<Koka.ExtractEff<T> | Async.Async, Koka.ExtractReturn<T>> {
-    return yield* all(inputs as any) as Generator<Koka.ExtractEff<T>, Koka.ExtractReturn<T>>
+    return yield* all(inputs as Koka.AnyEffector[], options) as Generator<Koka.ExtractEff<T>, Koka.ExtractReturn<T>>
 }
+
+export interface ObjectOptions extends ConcurrentOptions {}
 
 export function* object<T extends Record<string, unknown>>(
     inputs: T,
+    options?: ObjectOptions,
 ): Generator<Koka.ExtractEff<T> | Async.Async, Koka.ExtractReturn<T>> {
     const result: Record<string, unknown> = {}
     const gens = [] as Generator<Koka.AnyEff>[]
@@ -340,7 +450,12 @@ export function* object<T extends Record<string, unknown>>(
 
     for (const [key, value] of Object.entries(inputs)) {
         if (typeof value === 'function') {
-            gens.push(value())
+            const gen = value()
+            if (Gen.isGen(gen)) {
+                gens.push(gen as Generator<Koka.AnyEff>)
+            } else {
+                gens.push(Gen.of(gen))
+            }
         } else if (Gen.isGen(value)) {
             gens.push(value as Generator<Koka.AnyEff>)
         } else {
@@ -349,7 +464,7 @@ export function* object<T extends Record<string, unknown>>(
         keys.push(key)
     }
 
-    const values = (yield* all(gens) as any) as unknown[]
+    const values = (yield* all(gens, options) as any) as unknown[]
 
     for (let i = 0; i < values.length; i++) {
         result[keys[i]] = values[i]
@@ -358,52 +473,96 @@ export function* object<T extends Record<string, unknown>>(
     return result as Koka.ExtractReturn<T>
 }
 
-export type AllOptions = {
-    maxConcurrency?: number
-}
+export interface AllOptions extends ConcurrentOptions {}
 
 export function* all<Return, Yield extends Koka.AnyEff = never>(
-    inputs: TaskSource<Yield, Return>,
+    inputs: TaskSource<Return, Yield>,
     options?: AllOptions,
-): Generator<Yield | Async.Async | Koka.Final, Return[]> {
-    const results = yield* concurrent(
-        inputs,
-        async (stream) => {
-            const results = [] as Return[]
+): Generator<Async.Async | Koka.Final | Yield, Return[]> {
+    function* toArray(stream: TaskResultStream<Return>) {
+        const results = [] as Return[]
 
-            for await (const { index, value } of stream) {
-                results[index] = value
+        while (true) {
+            const result = yield* stream.next()
+
+            if (result === TaskEnd) {
+                break
             }
 
-            return results
-        },
-        options,
-    )
+            results[result.index] = result.value
+        }
+
+        return results
+    }
+
+    const results = yield* concurrent(inputs, toArray, options)
 
     return results
 }
 
-export type RaceOptions = {
-    maxConcurrency?: number
-}
+export interface AllSettledOptions extends ConcurrentOptions {}
 
-export function* race<Return, Yield extends Koka.AnyEff = never>(
-    inputs: TaskSource<Yield, Return>,
-    options?: RaceOptions,
-): Generator<Yield | Async.Async | Koka.Final, Return> {
-    const result = yield* concurrent(
-        inputs,
-        async (stream) => {
-            for await (const { value } of stream) {
-                return value
+export function* allSettled<Return, Yield extends Koka.AnyEff = never>(
+    inputs: TaskSource<Return, Yield>,
+    options?: AllSettledOptions,
+): Generator<Async.Async | Koka.Final | Yield, TaskResult<Return>[]> {
+    function* toSettledArray(stream: TaskResultStream<Return>) {
+        const results = [] as TaskResult<Return>[]
+
+        while (true) {
+            const result = yield* stream.result()
+
+            if (result === TaskEnd) {
+                break
             }
 
-            throw new Error(`No results in race`)
-        },
-        options,
-    )
+            results[result.index] = result
+        }
 
-    return result
+        return results
+    }
+
+    const results = yield* concurrent(inputs, toSettledArray, options)
+
+    return results
+}
+
+export interface RaceOptions extends ConcurrentOptions {}
+
+export function* race<Return, Yield extends Koka.AnyEff = never>(
+    inputs: TaskSource<Return, Yield>,
+    options?: RaceOptions,
+): Generator<Async.Async | Koka.Final | Yield, Return> {
+    function* getFastestValue(stream: TaskResultStream<Return>) {
+        const result = yield* stream.next()
+
+        if (result === TaskEnd) {
+            throw new Error(`No results in race`)
+        }
+
+        return result.value
+    }
+
+    return yield* concurrent(inputs, getFastestValue, options)
+}
+
+export interface RaceResultOptions extends ConcurrentOptions {}
+
+export function* raceResult<Return, Yield extends Koka.AnyEff = never>(
+    inputs: TaskSource<Return, Yield>,
+    options?: RaceResultOptions,
+): Generator<Async.Async | Koka.Final | Yield, TaskResult<Return>> {
+    function* getFastestResult(stream: TaskResultStream<Return>) {
+        const result = yield* stream.result()
+
+        if (result === TaskEnd) {
+            throw new Error(`No results in race`)
+        }
+
+        return result
+    }
+
+    return yield* concurrent(inputs, getFastestResult, options)
 }
 
 export type DelayOptions = {
@@ -412,10 +571,14 @@ export type DelayOptions = {
 
 export function* delay(ms: number, options: DelayOptions = {}) {
     const { promise, resolve, reject } = Promise.withResolvers<void>()
-
     const controller = new AbortController()
-
     const id = setTimeout(resolve, ms)
+
+    // Check if already aborted before adding listener
+    if (options.signal?.aborted) {
+        clearTimeout(id)
+        throw new Error('Delay aborted')
+    }
 
     options.signal?.addEventListener(
         'abort',

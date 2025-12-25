@@ -39,6 +39,8 @@ type ExtractErrorHandlerReturn<Handlers, Eff> = Eff extends Err<infer Name, infe
 
 export type Effector<Yield, Return> = (() => Generator<Yield, Return>) | GeneratorIterable<Yield, Return>
 
+export type AnyEffector = Effector<AnyEff, any>
+
 type GeneratorIterable<Yield, Return> = {
     [Symbol.iterator]: () => Generator<Yield, Return>
 }
