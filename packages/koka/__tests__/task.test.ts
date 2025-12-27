@@ -371,29 +371,37 @@ describe('Task.concurrent', () => {
         const cleanUp = jest.fn()
         const returnFn = jest.fn()
 
-        function* valueGen(n: number) {
+        // Use different delays to ensure tasks complete at different times
+        function* valueGen(n: number, delay: number) {
             try {
-                yield* Async.await(Promise.resolve(1))
+                yield* Async.await(delayTime(delay))
                 returnFn()
-                return 1
+                return n
             } finally {
                 cleanUp(n)
             }
         }
 
-        const inputs = [valueGen(0), valueGen(1), valueGen(2), valueGen(3)]
-        const handler = async (_stream: Task.TaskResultStream<number>) => {
-            // Early return without consuming any results
-            return 42
+        // First task completes in 10ms, others take longer
+        const inputs = [valueGen(0, 10), valueGen(1, 100), valueGen(2, 100), valueGen(3, 100)]
+        function* reducer(stream: Task.TaskResultStream<number>) {
+            // Start consuming to trigger task startup
+            const first = yield* stream.next()
+            if (first !== Task.TaskEnd) {
+                // Early return after first result - remaining tasks should be cleaned up
+                return first.value
+            }
+            return -1
         }
 
-        const result = await Koka.runAsync(Task.concurrent(inputs, handler))
-        expect(result).toBe(42)
-        expect(returnFn).toHaveBeenCalledTimes(0)
+        const result = await Koka.runAsync(Task.concurrent(inputs, reducer))
+        expect(result).toBe(0) // First task (with shortest delay) completes first
+        expect(returnFn).toHaveBeenCalledTimes(1)
+        // All 4 tasks started but 3 were interrupted, so cleanUp called for all
         expect(cleanUp).toHaveBeenCalledTimes(4)
     })
 
-    it('should clean up pending effects on early return in for-await-of block', async () => {
+    it('should clean up pending effects on early return in reducer', async () => {
         const cleanUp = jest.fn()
         const returnFn = jest.fn()
 
@@ -409,10 +417,13 @@ describe('Task.concurrent', () => {
 
         const inputs = [produce(40), produce(20), produce(30), produce(10)]
 
-        const handler = async (stream: Task.TaskResultStream<number>) => {
-            const results = [] as Task.TaskResult<number>[]
+        function* reducer(stream: Task.TaskResultStream<number>) {
+            const results = [] as Task.TaskResultOk<number>[]
 
-            for await (const result of stream) {
+            while (true) {
+                const result = yield* stream.next()
+                if (result === Task.TaskEnd) break
+
                 results.push(result)
 
                 if (results.length === 2) {
@@ -423,11 +434,11 @@ describe('Task.concurrent', () => {
             throw new Error('Early return')
         }
 
-        const results = await Koka.runAsync(Task.concurrent(inputs, handler))
+        const results = await Koka.runAsync(Task.concurrent(inputs, reducer))
 
         expect(results).toEqual([
-            { index: 3, value: 10 },
-            { index: 1, value: 20 },
+            { type: 'task-ok', index: 3, value: 10 },
+            { type: 'task-ok', index: 1, value: 20 },
         ])
 
         expect(returnFn).toHaveBeenCalledTimes(2)
@@ -441,11 +452,13 @@ describe('Task.concurrent', () => {
 
         const inputs = [valueGen(1), valueGen(2), valueGen(3)]
 
-        const program = Task.concurrent(inputs, async (stream) => {
+        const program = Task.concurrent(inputs, function* (stream) {
             const results = [] as number[]
 
-            for await (const { index, value } of stream) {
-                results[index] = value * 2
+            while (true) {
+                const result = yield* stream.next()
+                if (result === Task.TaskEnd) break
+                results[result.index] = result.value * 2
             }
 
             return results
@@ -456,11 +469,13 @@ describe('Task.concurrent', () => {
     })
 
     it('should handle empty input stream', async () => {
-        const program = Task.concurrent([] as Generator<never, number>[], async (stream) => {
+        const program = Task.concurrent([] as Generator<never, number>[], function* (stream) {
             const results = [] as number[]
 
-            for await (const { index, value } of stream) {
-                results[index] = value * 2
+            while (true) {
+                const result = yield* stream.next()
+                if (result === Task.TaskEnd) break
+                results[result.index] = result.value * 2
             }
             return results
         })
@@ -478,15 +493,17 @@ describe('Task.concurrent', () => {
 
         const inputs = [asyncValueGen(1), asyncValueGen(2), asyncValueGen(3)]
 
-        const handler = async (stream: Task.TaskResultStream<number>) => {
+        function* reducer(stream: Task.TaskResultStream<number>) {
             const results = [] as number[]
-            for await (const { index, value } of stream) {
-                results[index] = value * 2
+            while (true) {
+                const result = yield* stream.next()
+                if (result === Task.TaskEnd) break
+                results[result.index] = result.value * 2
             }
             return results
         }
 
-        const program = Task.concurrent(inputs, handler)
+        const program = Task.concurrent(inputs, reducer)
 
         const result = await Koka.runAsync(program)
         expect(result).toEqual([2, 4, 6])
@@ -501,15 +518,17 @@ describe('Task.concurrent', () => {
         }
 
         const inputs = [failingGen()]
-        const handler = async (stream: Task.TaskResultStream<number>) => {
+        function* reducer(stream: Task.TaskResultStream<number>) {
             const results = [] as number[]
-            for await (const { value } of stream) {
-                results.push(value)
+            while (true) {
+                const result = yield* stream.next()
+                if (result === Task.TaskEnd) break
+                results.push(result.value)
             }
             return results
         }
 
-        const result = await Result.runAsync(Task.concurrent(inputs, handler))
+        const result = await Result.runAsync(Task.concurrent(inputs, reducer))
 
         expect(result).toEqual({
             type: 'err',
@@ -528,17 +547,19 @@ describe('Task.concurrent', () => {
         }
 
         const inputs = [syncGen(), asyncGen()]
-        const handler = async (stream: Task.TaskResultStream<number>) => {
+        function* reducer(stream: Task.TaskResultStream<number>) {
             const results = [] as number[]
 
-            for await (const { index, value } of stream) {
-                results[index] = value * 2
+            while (true) {
+                const result = yield* stream.next()
+                if (result === Task.TaskEnd) break
+                results[result.index] = result.value * 2
             }
 
             return results
         }
 
-        const result = await Koka.runAsync(Task.concurrent(inputs, handler))
+        const result = await Koka.runAsync(Task.concurrent(inputs, reducer))
 
         expect(result).toEqual([2, 4])
     })
@@ -557,10 +578,12 @@ describe('Task.concurrent', () => {
         }
 
         const inputs = [failingGen()]
-        const handler = async (stream: Task.TaskResultStream<number>) => {
+        function* reducer(stream: Task.TaskResultStream<number>) {
             try {
-                for await (const { value } of stream) {
-                    return value
+                while (true) {
+                    const result = yield* stream.next()
+                    if (result === Task.TaskEnd) break
+                    return result.value
                 }
                 return 0
             } catch {
@@ -568,7 +591,7 @@ describe('Task.concurrent', () => {
             }
         }
 
-        const result = await Result.runAsync(Task.concurrent(inputs, handler))
+        const result = await Result.runAsync(Task.concurrent(inputs, reducer))
         expect(result).toEqual({
             type: 'err',
             name: 'CleanupError',
@@ -583,17 +606,19 @@ describe('Task.concurrent', () => {
         }
 
         const inputs = [normalGen()]
-        const handler = async (stream: Task.TaskResultStream<number>) => {
+        function* reducer(stream: Task.TaskResultStream<number>) {
             const results = []
-            for await (const result of stream) {
+            while (true) {
+                const result = yield* stream.next()
+                if (result === Task.TaskEnd) break
                 results.push(result)
             }
             return results
         }
 
         // This should not throw an unexpected completion error
-        const result = await Koka.runAsync(Task.concurrent(inputs, handler))
-        expect(result).toEqual([{ index: 0, value: 42 }])
+        const result = await Koka.runAsync(Task.concurrent(inputs, reducer))
+        expect(result).toEqual([{ type: 'task-ok', index: 0, value: 42 }])
     })
 
     it('should handle stream with mixed sync and async effects', async () => {
@@ -607,35 +632,39 @@ describe('Task.concurrent', () => {
         }
 
         const inputs = [syncGen(), asyncGen()]
-        const handler = async (stream: Task.TaskResultStream<number>) => {
+        function* reducer(stream: Task.TaskResultStream<number>) {
             const results = []
-            for await (const result of stream) {
+            while (true) {
+                const result = yield* stream.next()
+                if (result === Task.TaskEnd) break
                 results.push(result)
             }
             return results
         }
 
-        const result = await Koka.runAsync(Task.concurrent(inputs, handler))
+        const result = await Koka.runAsync(Task.concurrent(inputs, reducer))
         expect(result).toEqual([
-            { index: 0, value: 1 },
-            { index: 1, value: 2 },
+            { type: 'task-ok', index: 0, value: 1 },
+            { type: 'task-ok', index: 1, value: 2 },
         ])
     })
 
-    it('should handle stream handler that resolves correctly', async () => {
+    it('should handle stream reducer that returns correctly', async () => {
         function* gen() {
             return 42
         }
 
         const inputs = [gen()]
-        const handler = async (stream: Task.TaskResultStream<number>) => {
-            for await (const result of stream) {
+        function* reducer(stream: Task.TaskResultStream<number>) {
+            while (true) {
+                const result = yield* stream.next()
+                if (result === Task.TaskEnd) break
                 return result.value * 2
             }
             return 0
         }
 
-        const result = await Koka.runAsync(Task.concurrent(inputs, handler))
+        const result = await Koka.runAsync(Task.concurrent(inputs, reducer))
         expect(result).toBe(84)
     })
 })
@@ -668,15 +697,17 @@ describe('Stream maxConcurrency and TaskProducer', () => {
             return undefined // Early termination
         }
 
-        const handler = async (stream: Task.TaskResultStream<string>) => {
+        function* reducer(stream: Task.TaskResultStream<string>) {
             const results = []
-            for await (const { value } of stream) {
-                results.push(value)
+            while (true) {
+                const result = yield* stream.next()
+                if (result === Task.TaskEnd) break
+                results.push(result.value)
             }
             return results
         }
 
-        const result = await Koka.runAsync(Task.concurrent(producer, handler, { maxConcurrency }))
+        const result = await Koka.runAsync(Task.concurrent(producer, reducer, { maxConcurrency }))
 
         expect(result).toEqual(['task-0', 'task-1', 'task-2', 'task-3'])
         // Verify that active task count never exceeds max concurrency limit
@@ -699,34 +730,38 @@ describe('Stream maxConcurrency and TaskProducer', () => {
             return undefined // Early termination
         }
 
-        const handler = async (stream: Task.TaskResultStream<string>) => {
+        function* reducer(stream: Task.TaskResultStream<string>) {
             const results = []
-            for await (const { value } of stream) {
-                results.push(value)
+            while (true) {
+                const result = yield* stream.next()
+                if (result === Task.TaskEnd) break
+                results.push(result.value)
             }
             return results
         }
 
-        const result = await Koka.runAsync(Task.concurrent(producer, handler, { maxConcurrency: 2 }))
+        const result = await Koka.runAsync(Task.concurrent(producer, reducer, { maxConcurrency: 2 }))
 
         expect(result).toEqual(['item-0', 'item-1', 'item-2'])
         expect(callCount).toBe(4) // 4th call returns undefined
     })
 
     it('should handle empty TaskProducer', async () => {
-        const producer = (index: number) => {
+        const producer = (_index: number) => {
             return undefined // Immediate termination
         }
 
-        const handler = async (stream: Task.TaskResultStream<string>) => {
+        function* reducer(stream: Task.TaskResultStream<string>) {
             const results = []
-            for await (const { value } of stream) {
-                results.push(value)
+            while (true) {
+                const result = yield* stream.next()
+                if (result === Task.TaskEnd) break
+                results.push(result.value)
             }
             return results
         }
 
-        const result = await Koka.runAsync(Task.concurrent(producer, handler))
+        const result = await Koka.runAsync(Task.concurrent(producer, reducer))
 
         expect(result).toEqual([])
     })
@@ -747,15 +782,17 @@ describe('Stream maxConcurrency and TaskProducer', () => {
             return undefined
         }
 
-        const handler = async (stream: Task.TaskResultStream<string>) => {
+        function* reducer(stream: Task.TaskResultStream<string>) {
             const results = [] as string[]
-            for await (const { index, value } of stream) {
-                results[index] = value
+            while (true) {
+                const result = yield* stream.next()
+                if (result === Task.TaskEnd) break
+                results[result.index] = result.value
             }
             return results
         }
 
-        const result = await Koka.runAsync(Task.concurrent(producer, handler, { maxConcurrency: 3 }))
+        const result = await Koka.runAsync(Task.concurrent(producer, reducer, { maxConcurrency: 3 }))
 
         expect(result).toEqual(['even-0', 'odd-1', 'even-2', 'odd-3', 'even-4'])
     })
@@ -915,21 +952,23 @@ describe('Edge cases for maxConcurrency', () => {
             return undefined
         }
 
-        const handler = async (stream: Task.TaskResultStream<string>) => {
+        function* reducer(stream: Task.TaskResultStream<string>) {
             const results = []
-            for await (const { value } of stream) {
-                results.push(value)
+            while (true) {
+                const result = yield* stream.next()
+                if (result === Task.TaskEnd) break
+                results.push(result.value)
             }
             return results
         }
 
         // Test maxConcurrency = 0
-        await expect(() => Koka.runAsync(Task.concurrent(producer, handler, { maxConcurrency: 0 }))).rejects.toThrow(
+        await expect(() => Koka.runAsync(Task.concurrent(producer, reducer, { maxConcurrency: 0 }))).rejects.toThrow(
             'maxConcurrency must be greater than 0',
         )
 
         // Test maxConcurrency = -1
-        await expect(() => Koka.runAsync(Task.concurrent(producer, handler, { maxConcurrency: -1 }))).rejects.toThrow(
+        await expect(() => Koka.runAsync(Task.concurrent(producer, reducer, { maxConcurrency: -1 }))).rejects.toThrow(
             'maxConcurrency must be greater than 0',
         )
     })
@@ -959,15 +998,17 @@ describe('Edge cases for maxConcurrency', () => {
             return undefined
         }
 
-        const handler = async (stream: Task.TaskResultStream<string>) => {
+        function* reducer(stream: Task.TaskResultStream<string>) {
             const results = []
-            for await (const { value } of stream) {
-                results.push(value)
+            while (true) {
+                const result = yield* stream.next()
+                if (result === Task.TaskEnd) break
+                results.push(result.value)
             }
             return results
         }
 
-        const result = await Koka.runAsync(Task.concurrent(producer, handler, { maxConcurrency: 1 }))
+        const result = await Koka.runAsync(Task.concurrent(producer, reducer, { maxConcurrency: 1 }))
 
         expect(result).toEqual(['item-0', 'item-1', 'item-2'])
         // Verify that max concurrency is indeed 1
@@ -1000,15 +1041,17 @@ describe('Edge cases for maxConcurrency', () => {
             return undefined
         }
 
-        const handler = async (stream: Task.TaskResultStream<string>) => {
+        function* reducer(stream: Task.TaskResultStream<string>) {
             const results = []
-            for await (const { value } of stream) {
-                results.push(value)
+            while (true) {
+                const result = yield* stream.next()
+                if (result === Task.TaskEnd) break
+                results.push(result.value)
             }
             return results
         }
 
-        const result = await Koka.runAsync(Task.concurrent(producer, handler, { maxConcurrency: 1000 }))
+        const result = await Koka.runAsync(Task.concurrent(producer, reducer, { maxConcurrency: 1000 }))
 
         expect(result).toEqual(['item-0', 'item-1', 'item-2', 'item-3', 'item-4'])
         // Verify all tasks can execute concurrently (max active tasks should equal total tasks)
@@ -1021,7 +1064,7 @@ describe('TaskProducer with error handling', () => {
     it('should handle errors in TaskProducer', async () => {
         class ProducerError extends Err.Err('ProducerError')<string> {}
 
-        const producer: Task.TaskProducer<ProducerError | Async.Async, string> = (index: number) => {
+        const producer: Task.TaskProducer<string, ProducerError | Async.Async> = (index: number) => {
             if (index === 1) {
                 return function* () {
                     yield* Err.throw(new ProducerError('Producer failed'))
@@ -1036,11 +1079,13 @@ describe('TaskProducer with error handling', () => {
             return undefined
         }
 
-        const handler = async (stream: Task.TaskResultStream<string>) => {
+        function* reducer(stream: Task.TaskResultStream<string>) {
             const results = []
             try {
-                for await (const { value } of stream) {
-                    results.push(value)
+                while (true) {
+                    const result = yield* stream.next()
+                    if (result === Task.TaskEnd) break
+                    results.push(result.value)
                 }
             } catch (error) {
                 if (error instanceof ProducerError) {
@@ -1051,7 +1096,7 @@ describe('TaskProducer with error handling', () => {
             return results
         }
 
-        const program = Task.concurrent(producer, handler, { maxConcurrency: 2 })
+        const program = Task.concurrent(producer, reducer, { maxConcurrency: 2 })
 
         const result = await Koka.runAsync(
             Koka.try(program).handle({
@@ -1091,15 +1136,17 @@ describe('TaskProducer with error handling', () => {
             return undefined
         }
 
-        const handler = async (stream: Task.TaskResultStream<string>) => {
+        function* reducer(stream: Task.TaskResultStream<string>) {
             const results = []
-            for await (const { value } of stream) {
-                results.push(value)
+            while (true) {
+                const result = yield* stream.next()
+                if (result === Task.TaskEnd) break
+                results.push(result.value)
             }
             return results
         }
 
-        const result = await Koka.runAsync(Task.concurrent(producer, handler, { maxConcurrency }))
+        const result = await Koka.runAsync(Task.concurrent(producer, reducer, { maxConcurrency }))
 
         expect(result).toEqual(['task-0', 'task-1', 'task-2', 'task-3', 'task-4'])
 
@@ -1136,15 +1183,17 @@ describe('TaskProducer with error handling', () => {
             return undefined
         }
 
-        const handler = async (stream: Task.TaskResultStream<string>) => {
+        function* reducer(stream: Task.TaskResultStream<string>) {
             const results = []
-            for await (const { value } of stream) {
-                results.push(value)
+            while (true) {
+                const result = yield* stream.next()
+                if (result === Task.TaskEnd) break
+                results.push(result.value)
             }
             return results
         }
 
-        const result = await Koka.runAsync(Task.concurrent(producer, handler))
+        const result = await Koka.runAsync(Task.concurrent(producer, reducer))
 
         expect(result).toEqual(['function', 'generator'])
     })
@@ -1161,17 +1210,18 @@ describe('Task.series', () => {
         }
 
         const inputs = [task(0), task(1), task(2)]
-        const handler = async (results: Task.TaskResultStream<string>) => {
+        // Use Task.concurrent directly with maxConcurrency: 1 to test series behavior
+        function* reducer(stream: Task.TaskResultStream<string>): Generator<Task.TaskWait<string>, string[]> {
             const streamResults = []
             while (true) {
-                const result = await results.next()
-                if (result.done) break
-                streamResults.push(result.value.value)
+                const result = yield* stream.next()
+                if (result === Task.TaskEnd) break
+                streamResults.push(result.value)
             }
             return streamResults
         }
 
-        const result = await Koka.runAsync(Task.series(inputs, handler))
+        const result = await Koka.runAsync(Task.concurrent(inputs, reducer, { maxConcurrency: 1 }))
 
         expect(result).toEqual(['task-0', 'task-1', 'task-2'])
         expect(executionOrder).toEqual([0, 1, 2]) // Sequential execution
@@ -1191,15 +1241,17 @@ describe('Task.series', () => {
             return undefined
         }
 
-        const handler = async (results: Task.TaskResultStream<string>) => {
+        function* reducer(stream: Task.TaskResultStream<string>): Generator<Task.TaskWait<string>, string[]> {
             const streamResults = []
-            for await (const { value } of results) {
-                streamResults.push(value)
+            while (true) {
+                const result = yield* stream.next()
+                if (result === Task.TaskEnd) break
+                streamResults.push(result.value)
             }
             return streamResults
         }
 
-        const result = await Koka.runAsync(Task.series(producer, handler))
+        const result = await Koka.runAsync(Task.concurrent(producer, reducer, { maxConcurrency: 1 }))
 
         expect(result).toEqual(['task-0', 'task-1', 'task-2'])
         expect(executionOrder).toEqual([0, 1, 2])
@@ -1218,15 +1270,17 @@ describe('Task.series', () => {
         }
 
         const inputs = [failingTask(), normalTask()]
-        const handler = async (stream: Task.TaskResultStream<string>) => {
+        function* reducer(stream: Task.TaskResultStream<string>): Generator<Task.TaskWait<string>, string[]> {
             const results = [] as string[]
-            for await (const { value } of stream) {
-                results.push(value)
+            while (true) {
+                const result = yield* stream.next()
+                if (result === Task.TaskEnd) break
+                results.push(result.value)
             }
             return results
         }
 
-        const result = await Result.runAsync(Task.series(inputs, handler))
+        const result = await Result.runAsync(Task.concurrent(inputs, reducer, { maxConcurrency: 1 }))
 
         expect(result).toEqual({
             type: 'err',
@@ -1249,16 +1303,19 @@ describe('Task.parallel', () => {
         }
 
         const inputs = [task(0), task(1), task(2)]
-        const handler = async (stream: Task.TaskResultStream<string>) => {
+        function* reducer(stream: Task.TaskResultStream<string>): Generator<Task.TaskWait<string>, string[]> {
             const results = []
-            for await (const { value } of stream) {
-                results.push(value)
+            while (true) {
+                const result = yield* stream.next()
+                if (result === Task.TaskEnd) break
+                results.push(result.value)
             }
             return results
         }
 
         const start = Date.now()
-        const result = await Koka.runAsync(Task.parallel(inputs, handler))
+        // Use Task.concurrent with no maxConcurrency (infinite) to test parallel behavior
+        const result = await Koka.runAsync(Task.concurrent(inputs, reducer))
         const totalTime = Date.now() - start
 
         expect(result).toEqual(['task-0', 'task-1', 'task-2'])
@@ -1284,16 +1341,18 @@ describe('Task.parallel', () => {
             return undefined
         }
 
-        const handler = async (stream: Task.TaskResultStream<string>) => {
+        function* reducer(stream: Task.TaskResultStream<string>): Generator<Task.TaskWait<string>, string[]> {
             const results = []
-            for await (const { value } of stream) {
-                results.push(value)
+            while (true) {
+                const result = yield* stream.next()
+                if (result === Task.TaskEnd) break
+                results.push(result.value)
             }
             return results
         }
 
         const start = Date.now()
-        const result = await Koka.runAsync(Task.parallel(producer, handler))
+        const result = await Koka.runAsync(Task.concurrent(producer, reducer))
         const totalTime = Date.now() - start
 
         expect(result).toEqual(['task-0', 'task-1', 'task-2'])
@@ -1315,15 +1374,17 @@ describe('Task.parallel', () => {
         }
 
         const inputs = [syncTask(), asyncTask()]
-        const handler = async (results: Task.TaskResultStream<string>) => {
+        function* reducer(stream: Task.TaskResultStream<string>): Generator<Task.TaskWait<string>, string[]> {
             const streamResults = []
-            for await (const { value } of results) {
-                streamResults.push(value)
+            while (true) {
+                const result = yield* stream.next()
+                if (result === Task.TaskEnd) break
+                streamResults.push(result.value)
             }
             return streamResults
         }
 
-        const result = await Koka.runAsync(Task.parallel(inputs, handler))
+        const result = await Koka.runAsync(Task.concurrent(inputs, reducer))
 
         expect(result).toContain('sync')
         expect(result).toContain('async')
@@ -1331,30 +1392,17 @@ describe('Task.parallel', () => {
 })
 
 describe('Task.concurrent with complex error scenarios', () => {
-    it('should handle handler throwing error', async () => {
+    it('should handle reducer throwing error', async () => {
         function* normalTask() {
             return 'normal'
         }
 
         const inputs = [normalTask()]
-        const handler = async (stream: Task.TaskResultStream<string>) => {
-            throw new Error('Handler error')
+        function* reducer(_stream: Task.TaskResultStream<string>): Generator<never, string> {
+            throw new Error('Reducer error')
         }
 
-        await expect(Result.runAsync(Task.concurrent(inputs, handler))).rejects.toThrow('Handler error')
-    })
-
-    it('should handle handler rejecting promise', async () => {
-        function* normalTask() {
-            return 'normal'
-        }
-
-        const inputs = [normalTask()]
-        const handler = async (stream: Task.TaskResultStream<string>) => {
-            return Promise.reject(new Error('Handler rejection'))
-        }
-
-        await expect(Result.runAsync(Task.concurrent(inputs, handler))).rejects.toThrow('Handler rejection')
+        await expect(Result.runAsync(Task.concurrent(inputs, reducer))).rejects.toThrow('Reducer error')
     })
 
     it('should handle multiple errors in stream', async () => {
@@ -1371,15 +1419,17 @@ describe('Task.concurrent with complex error scenarios', () => {
         }
 
         const inputs = [failingTask1(), failingTask2()]
-        const handler = async (stream: Task.TaskResultStream<string>) => {
+        function* reducer(stream: Task.TaskResultStream<string>) {
             const results = []
-            for await (const { value } of stream) {
-                results.push(value)
+            while (true) {
+                const result = yield* stream.next()
+                if (result === Task.TaskEnd) break
+                results.push(result.value)
             }
             return results
         }
 
-        const result = await Result.runAsync(Task.concurrent(inputs, handler))
+        const result = await Result.runAsync(Task.concurrent(inputs, reducer))
 
         // Should get the first error that occurs
         expect(result.type).toBe('err')
@@ -1392,32 +1442,36 @@ describe('Task.concurrent with complex error scenarios', () => {
     })
 
     it('should handle stream with no tasks', async () => {
-        const handler = async (stream: Task.TaskResultStream<string>) => {
+        function* reducer(stream: Task.TaskResultStream<string>) {
             const results = []
-            for await (const { value } of stream) {
-                results.push(value)
+            while (true) {
+                const result = yield* stream.next()
+                if (result === Task.TaskEnd) break
+                results.push(result.value)
             }
             return results
         }
 
-        const result = await Koka.runAsync(Task.concurrent([], handler))
+        const result = await Koka.runAsync(Task.concurrent([], reducer))
         expect(result).toEqual([])
     })
 
     it('should handle TaskProducer returning undefined immediately', async () => {
-        const producer = (index: number) => {
+        const producer = (_index: number) => {
             return undefined // No tasks
         }
 
-        const handler = async (stream: Task.TaskResultStream<string>) => {
+        function* reducer(stream: Task.TaskResultStream<string>) {
             const results = []
-            for await (const { value } of stream) {
-                results.push(value)
+            while (true) {
+                const result = yield* stream.next()
+                if (result === Task.TaskEnd) break
+                results.push(result.value)
             }
             return results
         }
 
-        const task = Task.concurrent(producer, handler)
+        const task = Task.concurrent(producer, reducer)
 
         const result = await Koka.runAsync(task)
         expect(result).toEqual([])
@@ -1434,15 +1488,17 @@ describe('Concurrent with complex async scenarios', () => {
         }
 
         const inputs = [nestedAsyncTask()]
-        const handler = async (stream: Task.TaskResultStream<number>) => {
+        function* reducer(stream: Task.TaskResultStream<number>) {
             const results = []
-            for await (const { value } of stream) {
-                results.push(value)
+            while (true) {
+                const result = yield* stream.next()
+                if (result === Task.TaskEnd) break
+                results.push(result.value)
             }
             return results
         }
 
-        const result = await Koka.runAsync(Task.concurrent(inputs, handler))
+        const result = await Koka.runAsync(Task.concurrent(inputs, reducer))
         expect(result).toEqual([6])
     })
 
@@ -1462,21 +1518,23 @@ describe('Concurrent with complex async scenarios', () => {
         }
 
         const inputs = [fastTask(), slowTask()]
-        const handler = async (stream: Task.TaskResultStream<string>) => {
+        function* reducer(stream: Task.TaskResultStream<string>) {
             const streamResults = []
-            for await (const { value } of stream) {
-                streamResults.push(value)
+            while (true) {
+                const result = yield* stream.next()
+                if (result === Task.TaskEnd) break
+                streamResults.push(result.value)
             }
             return streamResults
         }
 
-        const result = await Koka.runAsync(Task.concurrent(inputs, handler))
+        const result = await Koka.runAsync(Task.concurrent(inputs, reducer))
 
         expect(result).toEqual(['fast', 'slow'])
         expect(results).toEqual(['fast', 'slow'])
     })
 
-    it('should handle stream with early termination in handler', async () => {
+    it('should handle stream with early termination in reducer', async () => {
         let cleanupCalled = false
 
         function* longRunningTask() {
@@ -1489,14 +1547,16 @@ describe('Concurrent with complex async scenarios', () => {
         }
 
         const inputs = [longRunningTask()]
-        const handler = async (stream: Task.TaskResultStream<string>) => {
-            for await (const { value } of stream) {
-                return value // Early return
+        function* reducer(stream: Task.TaskResultStream<string>) {
+            while (true) {
+                const result = yield* stream.next()
+                if (result === Task.TaskEnd) break
+                return result.value // Early return
             }
             return 'no value'
         }
 
-        const result = await Koka.runAsync(Task.concurrent(inputs, handler))
+        const result = await Koka.runAsync(Task.concurrent(inputs, reducer))
         expect(result).toBe('long')
         expect(cleanupCalled).toBe(true)
     })
@@ -1517,15 +1577,17 @@ describe('Concurrent with maxConcurrency edge cases', () => {
             return undefined
         }
 
-        const handler = async (stream: Task.TaskResultStream<string>) => {
+        function* reducer(stream: Task.TaskResultStream<string>) {
             const results = []
-            for await (const { value } of stream) {
-                results.push(value)
+            while (true) {
+                const result = yield* stream.next()
+                if (result === Task.TaskEnd) break
+                results.push(result.value)
             }
             return results
         }
 
-        const result = await Koka.runAsync(Task.concurrent(producer, handler, { maxConcurrency: 1 }))
+        const result = await Koka.runAsync(Task.concurrent(producer, reducer, { maxConcurrency: 1 }))
 
         expect(result).toEqual(['task-0', 'task-1', 'task-2', 'task-3', 'task-4'])
         expect(executionOrder).toEqual([0, 1, 2, 3, 4]) // Sequential
@@ -1549,15 +1611,17 @@ describe('Concurrent with maxConcurrency edge cases', () => {
             return undefined
         }
 
-        const handler = async (stream: Task.TaskResultStream<string>) => {
+        function* reducer(stream: Task.TaskResultStream<string>) {
             const results = []
-            for await (const { value } of stream) {
-                results.push(value)
+            while (true) {
+                const result = yield* stream.next()
+                if (result === Task.TaskEnd) break
+                results.push(result.value)
             }
             return results
         }
 
-        const result = await Koka.runAsync(Task.concurrent(producer, handler, { maxConcurrency: 10 }))
+        const result = await Koka.runAsync(Task.concurrent(producer, reducer, { maxConcurrency: 10 }))
 
         expect(result).toEqual(['task-0', 'task-1', 'task-2'])
         expect(activeTasks.length).toBe(0)
@@ -1590,15 +1654,17 @@ describe('Concurrent with maxConcurrency edge cases', () => {
             return undefined
         }
 
-        const handler = async (stream: Task.TaskResultStream<string>) => {
+        function* reducer(stream: Task.TaskResultStream<string>) {
             const results = []
-            for await (const { value } of stream) {
-                results.push(value)
+            while (true) {
+                const result = yield* stream.next()
+                if (result === Task.TaskEnd) break
+                results.push(result.value)
             }
             return results
         }
 
-        const result = await Koka.runAsync(Task.concurrent(producer, handler, { maxConcurrency: 2 }))
+        const result = await Koka.runAsync(Task.concurrent(producer, reducer, { maxConcurrency: 2 }))
 
         expect(result.length).toBe(4)
         expect(maxActiveCount.value).toBeLessThanOrEqual(2)
@@ -1613,15 +1679,17 @@ describe('Concurrent with complex data types', () => {
         }
 
         const inputs = [objectTask()]
-        const handler = async (stream: Task.TaskResultStream<{ id: number; name: string }>) => {
+        function* reducer(stream: Task.TaskResultStream<{ id: number; name: string }>) {
             const results = []
-            for await (const { value } of stream) {
-                results.push(value)
+            while (true) {
+                const result = yield* stream.next()
+                if (result === Task.TaskEnd) break
+                results.push(result.value)
             }
             return results
         }
 
-        const result = await Koka.runAsync(Task.concurrent(inputs, handler))
+        const result = await Koka.runAsync(Task.concurrent(inputs, reducer))
         expect(result).toEqual([{ id: 1, name: 'test' }])
     })
 
@@ -1631,15 +1699,17 @@ describe('Concurrent with complex data types', () => {
         }
 
         const inputs = [arrayTask()]
-        const handler = async (stream: Task.TaskResultStream<number[]>) => {
+        function* reducer(stream: Task.TaskResultStream<number[]>) {
             const results = []
-            for await (const { value } of stream) {
-                results.push(value)
+            while (true) {
+                const result = yield* stream.next()
+                if (result === Task.TaskEnd) break
+                results.push(result.value)
             }
             return results
         }
 
-        const result = await Koka.runAsync(Task.concurrent(inputs, handler))
+        const result = await Koka.runAsync(Task.concurrent(inputs, reducer))
         expect(result).toEqual([[1, 2, 3]])
     })
 
@@ -1653,15 +1723,17 @@ describe('Concurrent with complex data types', () => {
         }
 
         const inputs = [nullTask(), undefinedTask()]
-        const handler = async (stream: Task.TaskResultStream<null | undefined>) => {
+        function* reducer(stream: Task.TaskResultStream<null | undefined>) {
             const results = []
-            for await (const { value } of stream) {
-                results.push(value)
+            while (true) {
+                const result = yield* stream.next()
+                if (result === Task.TaskEnd) break
+                results.push(result.value)
             }
             return results
         }
 
-        const result = await Koka.runAsync(Task.concurrent(inputs, handler))
+        const result = await Koka.runAsync(Task.concurrent(inputs, reducer))
         expect(result).toEqual([null, undefined])
     })
 })
@@ -1688,16 +1760,18 @@ describe('Concurrent performance and stress tests', () => {
             return undefined
         }
 
-        const handler = async (stream: Task.TaskResultStream<string>) => {
+        function* reducer(stream: Task.TaskResultStream<string>) {
             const results = []
-            for await (const { value } of stream) {
-                results.push(value)
+            while (true) {
+                const result = yield* stream.next()
+                if (result === Task.TaskEnd) break
+                results.push(result.value)
             }
             return results
         }
 
         const start = Date.now()
-        const result = await Koka.runAsync(Task.concurrent(producer, handler, { maxConcurrency: 10 }))
+        const result = await Koka.runAsync(Task.concurrent(producer, reducer, { maxConcurrency: 10 }))
         const duration = Date.now() - start
 
         expect(result.length).toBe(taskCount)
@@ -1718,15 +1792,17 @@ describe('Concurrent performance and stress tests', () => {
             return undefined
         }
 
-        const handler = async (stream: Task.TaskResultStream<string>) => {
+        function* reducer(stream: Task.TaskResultStream<string>) {
             const results = []
-            for await (const { value } of stream) {
-                results.push(value)
+            while (true) {
+                const result = yield* stream.next()
+                if (result === Task.TaskEnd) break
+                results.push(result.value)
             }
             return results
         }
 
-        const result = await Koka.runAsync(Task.concurrent(producer, handler, { maxConcurrency: 20 }))
+        const result = await Koka.runAsync(Task.concurrent(producer, reducer, { maxConcurrency: 20 }))
 
         expect(result.length).toBe(taskCount)
         for (let i = 0; i < taskCount; i++) {
@@ -1754,24 +1830,26 @@ describe('Concurrent with cleanup and resource management', () => {
         }
 
         const inputs = [taskWithCleanup(0), failingTask(), taskWithCleanup(1)]
-        const handler = async (stream: Task.TaskResultStream<string>) => {
+        function* reducer(stream: Task.TaskResultStream<string>) {
             const results = []
-            for await (const { value } of stream) {
-                results.push(value)
+            while (true) {
+                const result = yield* stream.next()
+                if (result === Task.TaskEnd) break
+                results.push(result.value)
             }
             return results
         }
 
-        await expect(Result.runAsync(Task.concurrent(inputs, handler))).rejects.toThrow('Task failed')
+        await expect(Result.runAsync(Task.concurrent(inputs, reducer))).rejects.toThrow('Task failed')
         expect(cleanupCalls).toEqual([0, 1])
     })
 
-    it('should cleanup resources when handler throws', async () => {
+    it('should cleanup resources when reducer throws after starting tasks', async () => {
         const cleanupCalls: number[] = []
 
         function* taskWithCleanup(index: number) {
             try {
-                yield* Async.await(delayTime(10))
+                yield* Async.await(delayTime(50))
                 return `task-${index}`
             } finally {
                 cleanupCalls.push(index)
@@ -1779,12 +1857,16 @@ describe('Concurrent with cleanup and resource management', () => {
         }
 
         const inputs = [taskWithCleanup(0), taskWithCleanup(1)]
-        const handler = async (stream: Task.TaskResultStream<string>) => {
-            throw new Error('Handler error')
+        function* reducer(stream: Task.TaskResultStream<string>): Generator<Task.TaskWait<string>, string[]> {
+            // Start consuming to trigger task startup
+            yield* stream.next()
+            // Then throw error - tasks should be cleaned up
+            throw new Error('Reducer error')
         }
 
-        await expect(Result.runAsync(Task.concurrent(inputs, handler))).rejects.toThrow('Handler error')
-        expect(cleanupCalls).toEqual([0, 1])
+        await expect(Result.runAsync(Task.concurrent(inputs, reducer))).rejects.toThrow('Reducer error')
+        // Both tasks were started and should be cleaned up
+        expect(cleanupCalls.sort()).toEqual([0, 1])
     })
 })
 
@@ -1886,10 +1968,12 @@ describe('Task methods with Koka finally behavior', () => {
 
         function* program() {
             return yield* Koka.try(
-                Task.concurrent([task(0), task(1), task(2)], async (stream) => {
+                Task.concurrent([task(0), task(1), task(2)], function* (stream) {
                     const results = []
-                    for await (const { value } of stream) {
-                        results.push(value)
+                    while (true) {
+                        const result = yield* stream.next()
+                        if (result === Task.TaskEnd) break
+                        results.push(result.value)
                     }
                     return results
                 }),
@@ -1903,24 +1987,19 @@ describe('Task methods with Koka finally behavior', () => {
         expect(finalActions).toEqual(['cleanup'])
     })
 
-    it('should execute finally block on normal completion with Task.series', async () => {
+    it('should execute finally block on normal completion with Task.series (via all)', async () => {
         const finalActions: string[] = []
 
+        const executionOrder: number[] = []
+
         function* task(index: number) {
+            executionOrder.push(index)
             yield* Async.await(delayTime(10))
             return `task-${index}`
         }
 
         function* program() {
-            return yield* Koka.try(
-                Task.series([task(0), task(1), task(2)], async (stream) => {
-                    const results = []
-                    for await (const { value } of stream) {
-                        results.push(value)
-                    }
-                    return results
-                }),
-            ).finally(function* () {
+            return yield* Koka.try(Task.all([task(0), task(1), task(2)], { maxConcurrency: 1 })).finally(function* () {
                 finalActions.push('cleanup')
             })
         }
@@ -1928,9 +2007,10 @@ describe('Task methods with Koka finally behavior', () => {
         const result = await Koka.runAsync(program())
         expect(result).toEqual(['task-0', 'task-1', 'task-2'])
         expect(finalActions).toEqual(['cleanup'])
+        expect(executionOrder).toEqual([0, 1, 2]) // Sequential
     })
 
-    it('should execute finally block on normal completion with Task.parallel', async () => {
+    it('should execute finally block on normal completion with Task.parallel (via all)', async () => {
         const finalActions: string[] = []
 
         function* task(index: number) {
@@ -1939,15 +2019,7 @@ describe('Task methods with Koka finally behavior', () => {
         }
 
         function* program() {
-            return yield* Koka.try(
-                Task.parallel([task(0), task(1), task(2)], async (stream) => {
-                    const results = []
-                    for await (const { value } of stream) {
-                        results.push(value)
-                    }
-                    return results
-                }),
-            ).finally(function* () {
+            return yield* Koka.try(Task.all([task(0), task(1), task(2)])).finally(function* () {
                 finalActions.push('cleanup')
             })
         }
@@ -2195,10 +2267,12 @@ describe('Task methods with Koka finally behavior', () => {
 
         function* program() {
             return yield* Koka.try(
-                Task.concurrent([task(0), task(1), task(2)], async (stream) => {
+                Task.concurrent([task(0), task(1), task(2)], function* (stream) {
                     const results = []
-                    for await (const { value } of stream) {
-                        results.push(value)
+                    while (true) {
+                        const result = yield* stream.next()
+                        if (result === Task.TaskEnd) break
+                        results.push(result.value)
                         if (results.length === 2) {
                             return results // Early termination
                         }
@@ -2227,10 +2301,12 @@ describe('Task methods with Koka finally behavior', () => {
             return yield* Koka.try(
                 Task.concurrent(
                     [task(0), task(1), task(2), task(3)],
-                    async (stream) => {
+                    function* (stream) {
                         const results = []
-                        for await (const { value } of stream) {
-                            results.push(value)
+                        while (true) {
+                            const result = yield* stream.next()
+                            if (result === Task.TaskEnd) break
+                            results.push(result.value)
                         }
                         return results
                     },
@@ -2339,10 +2415,12 @@ describe('Task methods with Koka finally behavior', () => {
 
         function* program() {
             return yield* Koka.try(
-                Task.concurrent([subTask(0), subTask(1), subTask(2)], async (stream) => {
+                Task.concurrent([subTask(0), subTask(1), subTask(2)], function* (stream) {
                     const results = []
-                    for await (const { value } of stream) {
-                        results.push(value)
+                    while (true) {
+                        const result = yield* stream.next()
+                        if (result === Task.TaskEnd) break
+                        results.push(result.value)
                     }
                     return results
                 }),
@@ -2544,10 +2622,12 @@ describe('Task methods with Koka finally behavior', () => {
         function* program() {
             return yield* Koka.try(function* () {
                 executionOrder.push('program-start')
-                return yield* Task.concurrent([longRunningSubTask(0), longRunningSubTask(1)], async (stream) => {
+                return yield* Task.concurrent([longRunningSubTask(0), longRunningSubTask(1)], function* (stream) {
                     const results = []
-                    for await (const { value } of stream) {
-                        results.push(value)
+                    while (true) {
+                        const result = yield* stream.next()
+                        if (result === Task.TaskEnd) break
+                        results.push(result.value)
                     }
                     return results
                 })
@@ -2669,53 +2749,56 @@ describe('Task methods with Koka finally behavior', () => {
     })
 })
 
-describe('stream.throw behavior and handler error capture', () => {
-    it('should allow handler to catch native exception via try-catch and return result', async () => {
+describe('stream.throw behavior and reducer error capture', () => {
+    it('should allow reducer to catch native exception via try-catch and return result', async () => {
         /**
-         * When a task throws a native exception (throw new Error), stream.throw passes the error to the handler.
-         * The handler can catch this error via try-catch and handle it.
-         * Key point: After catching, concurrent returns the handler's return value normally instead of throwing.
+         * When a task throws a native exception (throw new Error), stream.next() passes the error to the reducer.
+         * The reducer can catch this error via try-catch and handle it.
+         * Key point: After catching, concurrent returns the reducer's return value normally instead of throwing.
          */
-        const handlerActions: string[] = []
+        const reducerActions: string[] = []
 
         function* failingTask(): Generator<Async.Async, string> {
             yield* Async.await(delayTime(10))
             throw new Error('Task failed')
         }
 
-        const handler = async (stream: Task.TaskResultStream<string>) => {
-            handlerActions.push('handler-start')
+        function* reducer(stream: Task.TaskResultStream<string>) {
+            reducerActions.push('reducer-start')
             try {
-                for await (const { value } of stream) {
-                    handlerActions.push(`received: ${value}`)
+                while (true) {
+                    const result = yield* stream.next()
+                    if (result === Task.TaskEnd) break
+                    reducerActions.push(`received: ${result.value}`)
                 }
-                handlerActions.push('stream-complete')
+                reducerActions.push('stream-complete')
             } catch (error) {
-                handlerActions.push(`caught: ${(error as Error).message}`)
+                reducerActions.push(`caught: ${(error as Error).message}`)
                 return 'error-handled'
             }
             return 'normal-complete'
         }
 
-        // When handler catches the stream.throw error, concurrent returns handler's return value normally
-        const result = await Koka.runAsync(Task.concurrent([failingTask()], handler))
+        // When reducer catches the stream.next() error, concurrent returns reducer's return value normally
+        const result = await Koka.runAsync(Task.concurrent([failingTask()], reducer))
 
         expect(result).toBe('error-handled')
-        expect(handlerActions).toEqual(['handler-start', 'caught: Task failed'])
+        expect(reducerActions).toEqual(['reducer-start', 'caught: Task failed'])
     })
 
-    it('should propagate Err effect through Koka effect system, not stream.throw', async () => {
+    it('should propagate Err effect through Koka effect system, not stream.next()', async () => {
         /**
          * When a task yields an Err effect, it propagates through the Koka effect system (yield effect)
-         * rather than through stream.throw, so handler's try-catch won't catch it.
+         * rather than through stream.next(), so reducer's try-catch won't catch it.
          * This is the key difference between Err effects and native exceptions.
          *
-         * Important: When Err effect propagates, the stream ends normally (not via exception).
-         * The handler completes normally, but the final result is Err.
+         * Important: When Err effect is yielded by a task, it propagates up through
+         * the generator chain, interrupting the reducer. The reducer does NOT complete
+         * normally - it's interrupted at the yield point.
          */
         class TaskError extends Err.Err('TaskError')<string> {}
 
-        const handlerActions: string[] = []
+        const reducerActions: string[] = []
 
         function* failingTask() {
             yield* Async.await(delayTime(10))
@@ -2723,21 +2806,23 @@ describe('stream.throw behavior and handler error capture', () => {
             return 'should not reach'
         }
 
-        const handler = async (stream: Task.TaskResultStream<string>) => {
-            handlerActions.push('handler-start')
+        function* reducer(stream: Task.TaskResultStream<string>) {
+            reducerActions.push('reducer-start')
             try {
-                for await (const { value } of stream) {
-                    handlerActions.push(`received: ${value}`)
+                while (true) {
+                    const result = yield* stream.next()
+                    if (result === Task.TaskEnd) break
+                    reducerActions.push(`received: ${result.value}`)
                 }
-            } catch (error) {
+            } catch {
                 // Err effect won't trigger this catch block
-                handlerActions.push('caught-error')
+                reducerActions.push('caught-error')
             }
-            handlerActions.push('handler-end')
+            reducerActions.push('reducer-end')
             return 'done'
         }
 
-        const result = await Result.runAsync(Task.concurrent([failingTask()], handler))
+        const result = await Result.runAsync(Task.concurrent([failingTask()], reducer))
 
         // Err effect propagates through Koka effect system, final result is Err
         expect(result).toEqual({
@@ -2745,17 +2830,18 @@ describe('stream.throw behavior and handler error capture', () => {
             name: 'TaskError',
             error: 'task error message',
         })
-        // Handler's try-catch didn't catch the Err effect (because it doesn't go through stream.throw)
-        // Stream ends normally, handler completes normally
-        expect(handlerActions).toEqual(['handler-start', 'handler-end'])
-        // Note: No 'caught-error', and no 'received: ...'
+        // Reducer is interrupted when Err effect propagates up through the generator chain.
+        // It doesn't reach 'reducer-end' or trigger the catch block.
+        // The Err effect is handled by Result.runAsync, not by the reducer.
+        expect(reducerActions).toEqual(['reducer-start'])
+        // Note: No 'caught-error', no 'received: ...', no 'reducer-end'
     })
 
     it('should demonstrate fail-fast behavior with native exceptions', async () => {
         /**
-         * Fail-fast behavior of stream.throw:
+         * Fail-fast behavior of stream.next():
          * When the first task throws a native exception, stream ends immediately.
-         * Handler can catch the error, other tasks will be cleaned up.
+         * Reducer can catch the error, other tasks will be cleaned up.
          */
         const taskActions: string[] = []
         const cleanupActions: string[] = []
@@ -2778,11 +2864,13 @@ describe('stream.throw behavior and handler error capture', () => {
             }
         }
 
-        const handler = async (stream: Task.TaskResultStream<string>) => {
+        function* reducer(stream: Task.TaskResultStream<string>) {
             const results: string[] = []
             try {
-                for await (const { value } of stream) {
-                    results.push(value)
+                while (true) {
+                    const result = yield* stream.next()
+                    if (result === Task.TaskEnd) break
+                    results.push(result.value)
                 }
             } catch (error) {
                 // Catch native exception
@@ -2791,9 +2879,9 @@ describe('stream.throw behavior and handler error capture', () => {
             return { error: null, results }
         }
 
-        const result = await Koka.runAsync(Task.concurrent([fastFailingTask(), slowTask()], handler))
+        const result = await Koka.runAsync(Task.concurrent([fastFailingTask(), slowTask()], reducer))
 
-        // Handler caught the error, concurrent returns normally
+        // Reducer caught the error, concurrent returns normally
         expect(result).toEqual({ error: 'Fast fail', results: [] })
 
         // Verify fail-fast behavior
@@ -2805,8 +2893,8 @@ describe('stream.throw behavior and handler error capture', () => {
 
     it('should demonstrate limitation: native exceptions can be handled but allSettled needs workaround', async () => {
         /**
-         * For native exceptions, handler can catch them.
-         * But once stream.throw is called, the stream ends.
+         * For native exceptions, reducer can catch them.
+         * But once error is thrown via stream.next(), the stream ends.
          * Cannot continue collecting results from other tasks.
          * Need to use task-level error handling to implement allSettled.
          */
@@ -2822,10 +2910,12 @@ describe('stream.throw behavior and handler error capture', () => {
             throw new Error('Task failed')
         }
 
-        const handler = async (stream: Task.TaskResultStream<string>) => {
+        function* reducer(stream: Task.TaskResultStream<string>) {
             try {
-                for await (const { index, value } of stream) {
-                    taskResults[index] = { status: 'fulfilled', value }
+                while (true) {
+                    const result = yield* stream.next()
+                    if (result === Task.TaskEnd) break
+                    taskResults[result.index] = { status: 'fulfilled', value: result.value }
                 }
             } catch (error) {
                 // With current design, we can only know "an error occurred"
@@ -2835,9 +2925,9 @@ describe('stream.throw behavior and handler error capture', () => {
             return taskResults
         }
 
-        const result = await Koka.runAsync(Task.concurrent([successTask(0), failTask(), successTask(2)], handler))
+        const result = await Koka.runAsync(Task.concurrent([successTask(0), failTask(), successTask(2)], reducer))
 
-        // Handler caught the error, returned partial results
+        // Reducer caught the error, returned partial results
         expect(result.some((r) => r.status === 'rejected')).toBe(true)
         // Due to fail-fast, successful tasks may not have a chance to complete
     })
@@ -2845,7 +2935,7 @@ describe('stream.throw behavior and handler error capture', () => {
     it('should demonstrate limitation: cannot implement some/any with stream-level error handling', async () => {
         /**
          * Limitation of current design:
-         * Native exceptions can be caught by handler, but stream ends immediately.
+         * Native exceptions can be caught by reducer, but stream ends immediately.
          * Cannot implement "N successes are enough, ignore failures" some/any semantics.
          * Need to use task-level error handling.
          */
@@ -2859,10 +2949,12 @@ describe('stream.throw behavior and handler error capture', () => {
             return `task-${id}`
         }
 
-        const handler = async (stream: Task.TaskResultStream<string>) => {
+        function* reducer(stream: Task.TaskResultStream<string>) {
             try {
-                for await (const { value } of stream) {
-                    completedTasks.push(value)
+                while (true) {
+                    const result = yield* stream.next()
+                    if (result === Task.TaskEnd) break
+                    completedTasks.push(result.value)
                     if (completedTasks.length >= 2) {
                         return { success: true, results: completedTasks }
                     }
@@ -2881,19 +2973,19 @@ describe('stream.throw behavior and handler error capture', () => {
                     mayFailTask(1, false), // 20ms, succeeds
                     mayFailTask(2, false), // 30ms, succeeds
                 ],
-                handler,
+                reducer,
             ),
         )
 
-        // Handler caught the error, returned failure result
+        // Reducer caught the error, returned failure result
         expect(result.success).toBe(false)
         // Due to fail-fast, even though 2 tasks would succeed, we cannot collect them
         expect(completedTasks.length).toBe(0)
     })
 
-    it('should handle multiple native exceptions - only first error reaches handler', async () => {
+    it('should handle multiple native exceptions - only first error reaches reducer', async () => {
         /**
-         * When multiple tasks throw native exceptions simultaneously, only the first error is reported to handler.
+         * When multiple tasks throw native exceptions simultaneously, only the first error is reported to reducer.
          * Subsequent errors are ignored (because stream has already ended).
          */
         const errorMessages: string[] = []
@@ -2903,9 +2995,11 @@ describe('stream.throw behavior and handler error capture', () => {
             throw new Error(`Error from task ${id}`)
         }
 
-        const handler = async (stream: Task.TaskResultStream<string>) => {
+        function* reducer(stream: Task.TaskResultStream<string>) {
             try {
-                for await (const { value } of stream) {
+                while (true) {
+                    const result = yield* stream.next()
+                    if (result === Task.TaskEnd) break
                     // Should not reach here
                 }
             } catch (error) {
@@ -2915,19 +3009,19 @@ describe('stream.throw behavior and handler error capture', () => {
         }
 
         const result = await Koka.runAsync(
-            Task.concurrent([failingTask(0, 10), failingTask(1, 10), failingTask(2, 10)], handler),
+            Task.concurrent([failingTask(0, 10), failingTask(1, 10), failingTask(2, 10)], reducer),
         )
 
-        // Handler caught the first error, concurrent returns normally
+        // Reducer caught the first error, concurrent returns normally
         expect(result).toBe('done')
-        // Only one error was caught by handler
+        // Only one error was caught by reducer
         expect(errorMessages.length).toBe(1)
         expect(errorMessages[0]).toMatch(/Error from task [012]/)
     })
 
-    it('should properly cleanup other tasks when stream.throw is called', async () => {
+    it('should properly cleanup other tasks when error is thrown', async () => {
         /**
-         * When stream.throw is called, other running tasks should be properly cleaned up.
+         * When an error is thrown, other running tasks should be properly cleaned up.
          */
         const taskStates: Record<number, { started: boolean; cleaned: boolean }> = {
             0: { started: false, cleaned: false },
@@ -2948,10 +3042,12 @@ describe('stream.throw behavior and handler error capture', () => {
             }
         }
 
-        const handler = async (stream: Task.TaskResultStream<string>) => {
+        function* reducer(stream: Task.TaskResultStream<string>) {
             const results: string[] = []
-            for await (const { value } of stream) {
-                results.push(value)
+            while (true) {
+                const result = yield* stream.next()
+                if (result === Task.TaskEnd) break
+                results.push(result.value)
             }
             return results
         }
@@ -2964,7 +3060,7 @@ describe('stream.throw behavior and handler error capture', () => {
                         taskWithCleanup(1, 10, true), // Fastest to complete but fails
                         taskWithCleanup(2, 50, false),
                     ],
-                    handler,
+                    reducer,
                 ),
             ),
         ).rejects.toThrow('Task 1 failed')
@@ -2978,10 +3074,10 @@ describe('stream.throw behavior and handler error capture', () => {
         expect(taskStates[2].cleaned).toBe(true)
     })
 
-    it('should handle stream.throw with Err effect and Result.runAsync', async () => {
+    it('should handle error with Err effect and Result.runAsync', async () => {
         /**
          * Using Result.runAsync can elegantly handle Err effects.
-         * But stream.throw behavior remains: once an error occurs, stream ends.
+         * But stream.next() behavior remains: once an error occurs, stream ends.
          */
         class ApiError extends Err.Err('ApiError')<{ code: number; message: string }> {}
 
@@ -2993,16 +3089,18 @@ describe('stream.throw behavior and handler error capture', () => {
             return { id, data: `response-${id}` }
         }
 
-        const handler = async (stream: Task.TaskResultStream<{ id: number; data: string }>) => {
+        function* reducer(stream: Task.TaskResultStream<{ id: number; data: string }>) {
             const results: Array<{ id: number; data: string }> = []
-            for await (const { value } of stream) {
-                results.push(value)
+            while (true) {
+                const result = yield* stream.next()
+                if (result === Task.TaskEnd) break
+                results.push(result.value)
             }
             return results
         }
 
         const result = await Result.runAsync(
-            Task.concurrent([apiCall(0, false), apiCall(1, true), apiCall(2, false)], handler),
+            Task.concurrent([apiCall(0, false), apiCall(1, true), apiCall(2, false)], reducer),
         )
 
         // Result.runAsync converts error to Result type
@@ -3037,10 +3135,12 @@ describe('stream.throw behavior and handler error capture', () => {
             return `success-${id}`
         }
 
-        const handler = async (stream: Task.TaskResultStream<SettledResult<string>>) => {
+        function* reducer(stream: Task.TaskResultStream<SettledResult<string>>) {
             const results: Array<SettledResult<string>> = []
-            for await (const { index, value } of stream) {
-                results[index] = value
+            while (true) {
+                const result = yield* stream.next()
+                if (result === Task.TaskEnd) break
+                results[result.index] = result.value
             }
             return results
         }
@@ -3049,7 +3149,7 @@ describe('stream.throw behavior and handler error capture', () => {
         const result = await Koka.runAsync(
             Task.concurrent(
                 [wrapTask(mayFailTask(0, false)), wrapTask(mayFailTask(1, true)), wrapTask(mayFailTask(2, false))],
-                handler,
+                reducer,
             ),
         )
 
@@ -3085,19 +3185,22 @@ describe('stream.throw behavior and handler error capture', () => {
         }
 
         // Implement "at least N successes" semantics
-        const handler = async (stream: Task.TaskResultStream<MaybeResult<string>>) => {
+        function* reducer(stream: Task.TaskResultStream<MaybeResult<string>>) {
             const successes: string[] = []
             const failures: string[] = []
             const requiredSuccesses = 2
 
-            for await (const { value } of stream) {
-                if (value.ok) {
-                    successes.push(value.value)
+            while (true) {
+                const result = yield* stream.next()
+                if (result === Task.TaskEnd) break
+
+                if (result.value.ok) {
+                    successes.push(result.value.value)
                     if (successes.length >= requiredSuccesses) {
                         return { successes, failures }
                     }
                 } else {
-                    failures.push(value.error)
+                    failures.push(result.value.error)
                 }
             }
 
@@ -3116,11 +3219,83 @@ describe('stream.throw behavior and handler error capture', () => {
                     wrapTask(unreliableTask(2)), // fails
                     wrapTask(unreliableTask(3)), // succeeds
                 ],
-                handler,
+                reducer,
             ),
         )
 
         expect(result.successes).toEqual(['success-1', 'success-3'])
         expect(result.failures).toContain('Task 0 failed')
+    })
+
+    it('should demonstrate using stream.result() for allSettled behavior', async () => {
+        /**
+         * New design: Use stream.result() to get TaskResult (success or error) without throwing.
+         * This is the built-in way to implement allSettled behavior.
+         */
+        function* mayFailTask(id: number, shouldFail: boolean): Generator<Async.Async, string> {
+            yield* Async.await(delayTime(10))
+            if (shouldFail) {
+                throw new Error(`Task ${id} failed`)
+            }
+            return `success-${id}`
+        }
+
+        function* reducer(stream: Task.TaskResultStream<string>) {
+            const results: Task.TaskResult<string>[] = []
+            while (true) {
+                const result = yield* stream.result()
+                if (result === Task.TaskEnd) break
+                results[result.index] = result
+            }
+            return results
+        }
+
+        const result = await Koka.runAsync(
+            Task.concurrent([mayFailTask(0, false), mayFailTask(1, true), mayFailTask(2, false)], reducer),
+        )
+
+        expect(result[0]).toEqual({ type: 'task-ok', index: 0, value: 'success-0' })
+        expect(result[1]).toEqual({ type: 'task-err', index: 1, error: expect.any(Error) })
+        expect(result[2]).toEqual({ type: 'task-ok', index: 2, value: 'success-2' })
+    })
+
+    it('should demonstrate using Task.allSettled for allSettled behavior', async () => {
+        /**
+         * New design: Use Task.allSettled() to collect all results (success or error).
+         */
+        function* mayFailTask(id: number, shouldFail: boolean): Generator<Async.Async, string> {
+            yield* Async.await(delayTime(10))
+            if (shouldFail) {
+                throw new Error(`Task ${id} failed`)
+            }
+            return `success-${id}`
+        }
+
+        const result = await Koka.runAsync(
+            Task.allSettled([mayFailTask(0, false), mayFailTask(1, true), mayFailTask(2, false)]),
+        )
+
+        expect(result[0]).toEqual({ type: 'task-ok', index: 0, value: 'success-0' })
+        expect(result[1]).toEqual({ type: 'task-err', index: 1, error: expect.any(Error) })
+        expect(result[2]).toEqual({ type: 'task-ok', index: 2, value: 'success-2' })
+    })
+
+    it('should demonstrate using Task.raceResult for race with any result', async () => {
+        /**
+         * New design: Use Task.raceResult() to get the first result (success or error).
+         */
+        function* fastFailTask(): Generator<Async.Async, string> {
+            yield* Async.await(delayTime(10))
+            throw new Error('Fast fail')
+        }
+
+        function* slowSuccessTask(): Generator<Async.Async, string> {
+            yield* Async.await(delayTime(50))
+            return 'slow success'
+        }
+
+        const result = await Koka.runAsync(Task.raceResult([fastFailTask(), slowSuccessTask()]))
+
+        expect(result).toEqual({ type: 'task-err', index: 0, error: expect.any(Error) })
     })
 })
