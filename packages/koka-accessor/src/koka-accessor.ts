@@ -174,7 +174,7 @@ export function object<T extends Record<string, AnyAccessor>>(
         .prop('newObject')
 }
 
-export function optional<State, Root>(accessor: Accessor<State, Root>): Accessor<State | undefined, Root> {
+export function optional<State, Root>(accessor: Accessor<State, Root>): Accessor<Koka.Final | State | undefined, Root> {
     return root<Root>().transform<State | undefined>({
         *get(root) {
             const result = yield* Result.wrap(accessor.get(root))
