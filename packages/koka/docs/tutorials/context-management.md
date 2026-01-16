@@ -18,6 +18,7 @@ Let's start with simple context effects:
 ```typescript
 import * as Koka from 'koka'
 import * as Ctx from 'koka/ctx'
+import * as Async from 'koka/async'
 
 // Define a context effect for a database connection
 class Database extends Ctx.Ctx('Database')<{
@@ -291,7 +292,7 @@ const program = Koka.try(getUserWithCache('123')).handle({
 const result = await Koka.run(program)
 ```
 
-## Nested Context Patterns
+## Multi Context Patterns
 
 ### 1. Context Composition
 
@@ -312,7 +313,7 @@ class RequestContext extends Ctx.Ctx('RequestContext')<{
     headers: Record<string, string>
 }> {}
 
-// Nested context usage
+// multi context usage
 function* processRequest(requestId: string, userId: string) {
     const auth = yield* Ctx.get(AuthContext)
     const request = yield* Ctx.get(RequestContext)
@@ -346,6 +347,7 @@ Create layered context handling:
 ```typescript
 import * as Koka from 'koka'
 import * as Ctx from 'koka/ctx'
+import * as Async from 'koka/async'
 
 class DatabaseLayer extends Ctx.Ctx('DatabaseLayer')<{
     query: (sql: string) => Promise<any>
@@ -402,6 +404,7 @@ Context effects make testing much easier:
 import * as Koka from 'koka'
 import * as Ctx from 'koka/ctx'
 import * as Err from 'koka/err'
+import * as Async from 'koka/async'
 
 class UserService extends Ctx.Ctx('UserService')<{
     getUser: (id: string) => Promise<User>
