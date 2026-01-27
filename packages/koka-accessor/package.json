@@ -17,6 +17,7 @@
         "node": ">=22.18"
     },
     "scripts": {
+        "test:path": "jest --testPathPattern $1",
         "test": "jest",
         "test:coverage": "jest --collectCoverage --coverage"
     },

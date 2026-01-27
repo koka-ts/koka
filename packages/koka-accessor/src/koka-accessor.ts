@@ -1,12 +1,13 @@
 import * as Err from 'koka/err'
-import * as Gen from 'koka/gen'
 import * as Result from 'koka/result'
 
 export class AccessorErr extends Err.Err('koka-accessor/accessor-err')<string> {}
 
-export type Getter<State, Root> = (root: Root) => Generator<AccessorErr, State>
+export type AccessorResult<T> = Result.Ok<T> | AccessorErr
 
-export type Updater<State> = (state: State) => Generator<AccessorErr, State>
+export type Getter<State, Root> = (root: Root) => AccessorResult<State>
+
+export type Updater<State> = (state: State) => AccessorResult<State>
 
 export type Setter<State, Root> = (updater: Updater<State>) => Updater<Root>
 
@@ -19,19 +20,9 @@ export type ArrayItem<T> = T extends (infer U)[] | readonly (infer U)[] ? U : ne
 
 export type GetKey<T> = (item: ArrayItem<T>) => string | number
 
-export type MaybeAccessorEff<T> = T | Generator<AccessorErr, T>
-
-export function* getValue<T>(value: MaybeAccessorEff<T>): Generator<AccessorErr, T> {
-    if (Gen.isGen(value)) {
-        return yield* value
-    } else {
-        return value
-    }
-}
-
 export type Transformer<Target, State> = {
-    get: (state: State) => MaybeAccessorEff<Target>
-    set: (target: Target, state: State) => MaybeAccessorEff<State>
+    get: (state: State) => AccessorResult<Target>
+    set: (target: Target, state: State) => AccessorResult<State>
 }
 
 export type InferAccessorState<T> = T extends Accessor<infer State, any> ? State : never
@@ -122,14 +113,16 @@ function createAccessorProxy<State>(path: AccessorProxyPath = []): AccessorProxy
 
 export function root<Root>(): Accessor<Root, Root> {
     return new Accessor({
-        *get(root) {
-            return root
+        get(root) {
+            return Result.ok(root)
         },
         set: (updater) => {
-            return function* (root) {
-                const newRoot = yield* updater(root)
-
-                return newRoot
+            return (root) => {
+                const result = updater(root)
+                if (result.type === 'err') {
+                    return result
+                }
+                return Result.ok(result.value)
             }
         },
     })
@@ -140,20 +133,25 @@ export function object<T extends Record<string, AnyAccessor>>(
 ): Accessor<{ [K in keyof T]: InferAccessorState<T[K]> }, InferAccessorRoot<T[keyof T]>> {
     return root<InferAccessorRoot<T[keyof T]>>()
         .transform({
-            *get(root) {
+            get(root) {
                 const object = {} as { [K in keyof T]: InferAccessorState<T[K]> }
 
                 for (const key in accessors) {
                     // @ts-ignore
-                    object[key] = yield* accessors[key].get(root)
+                    const result = accessors[key].get(root)
+                    if (result.type === 'err') {
+                        return result
+                    }
+                    object[key] = result.value
                 }
 
-                return {
+                return Result.ok({
                     oldObject: object,
                     newObject: object,
-                }
+                })
             },
-            *set(state, root) {
+            set(state, root) {
+                let currentRoot = root
                 for (const key in state.newObject) {
                     const newValue = state.newObject[key]
                     const oldValue = state.oldObject[key]
@@ -163,43 +161,47 @@ export function object<T extends Record<string, AnyAccessor>>(
                     }
 
                     // @ts-ignore expected
-                    root = yield* accessors[key].set(function* () {
-                        return newValue as any
-                    })(root)
+                    const result = accessors[key].set(() => Result.ok(newValue as any))(currentRoot)
+                    if (result.type === 'err') {
+                        return result
+                    }
+                    currentRoot = result.value
                 }
 
-                return root
+                return Result.ok(currentRoot)
             },
         })
         .prop('newObject')
 }
 
-export function optional<State, Root>(accessor: Accessor<State, Root>): Accessor<Koka.Final | State | undefined, Root> {
+export function optional<State, Root>(accessor: Accessor<State, Root>): Accessor<State | undefined, Root> {
     return root<Root>().transform<State | undefined>({
-        *get(root) {
-            const result = yield* Result.wrap(accessor.get(root))
+        get(root) {
+            const result = accessor.get(root)
 
             if (result.type === 'ok') {
-                return result.value
+                return Result.ok(result.value)
             }
+            return Result.ok(undefined)
         },
-        *set(state, root) {
+        set(state, root) {
             if (state === undefined) {
-                return root
+                return Result.ok(root)
             }
 
             const newState = state as State
 
-            const newRoot = yield* accessor.set(function* () {
-                return newState
-            })(root)
+            const result = accessor.set(() => Result.ok(newState))(root)
+            if (result.type === 'err') {
+                return result
+            }
 
-            return newRoot
+            return Result.ok(result.value)
         },
     })
 }
 
-export function get<State, Root>(root: Root, accessor: Accessor<State, Root>): Generator<AccessorErr, State> {
+export function get<State, Root>(root: Root, accessor: Accessor<State, Root>): AccessorResult<State> {
     return accessor.get(root)
 }
 
@@ -207,23 +209,25 @@ export function set<State, Root>(
     root: Root,
     accessor: Accessor<State, Root>,
     stateOrUpdater: State | ((state: State) => State) | Updater<State>,
-): Generator<AccessorErr, Root> {
+): AccessorResult<Root> {
     if (typeof stateOrUpdater === 'function') {
         const updater = stateOrUpdater as ((state: State) => State) | Updater<State>
-        return accessor.set(function* (state) {
-            const newState = updater(state)
+        return accessor.set((state) => {
+            const result = updater(state)
 
-            if (Gen.isGen(newState)) {
-                return yield* newState
+            // Check if it's already an AccessorResult (Updater<State>)
+            if (result && typeof result === 'object' && 'type' in result) {
+                if (result.type === 'err' || result.type === 'ok') {
+                    return result as AccessorResult<State>
+                }
             }
 
-            return newState
+            // Otherwise it's a plain function that returns State
+            return Result.ok(result as State)
         })(root)
     } else {
         const state = stateOrUpdater as State
-        return accessor.set(function* () {
-            return state
-        })(root)
+        return accessor.set(() => Result.ok(state))(root)
     }
 }
 
@@ -244,16 +248,20 @@ export class Accessor<State, Root> {
         const { get, set } = this
 
         const accessor: Accessor<Target, Root> = new Accessor({
-            *get(root) {
+            get(root) {
                 const isObjectRoot = typeof root === 'object' && root !== null
 
                 let accessorMap = isObjectRoot ? accessorWeakMap.get(root) : null
 
                 if (accessorMap?.has(accessor)) {
-                    return accessorMap.get(accessor)! as Target
+                    return Result.ok(accessorMap.get(accessor)! as Target)
                 }
 
-                const state = yield* get(root)
+                const stateResult = get(root)
+                if (stateResult.type === 'err') {
+                    return stateResult
+                }
+                const state = stateResult.value
 
                 const isObjectState = typeof state === 'object' && state !== null
 
@@ -266,10 +274,14 @@ export class Accessor<State, Root> {
                         setAccessorCache(root, accessor, target)
                     }
 
-                    return target
+                    return Result.ok(target)
                 }
 
-                const target = yield* getValue(selector.get(state))
+                const targetResult = selector.get(state)
+                if (targetResult.type === 'err') {
+                    return targetResult
+                }
+                const target = targetResult.value
 
                 if (isObjectState) {
                     setAccessorCache(state, accessor, target)
@@ -279,10 +291,10 @@ export class Accessor<State, Root> {
                     setAccessorCache(root, accessor, target)
                 }
 
-                return target
+                return Result.ok(target)
             },
             set: (updater) => {
-                const updateState = function* (state: State) {
+                const updateState = (state: State): AccessorResult<State> => {
                     let target: Target
 
                     const isObjectState = typeof state === 'object' && state !== null
@@ -292,23 +304,36 @@ export class Accessor<State, Root> {
                     if (accessorMap?.has(accessor)) {
                         target = accessorMap.get(accessor)! as Target
                     } else {
-                        target = yield* getValue(selector.get(state))
+                        const targetResult = selector.get(state)
+                        if (targetResult.type === 'err') {
+                            return targetResult
+                        }
+                        target = targetResult.value
 
                         if (isObjectState) {
                             setAccessorCache(state, accessor, target)
                         }
                     }
 
-                    const newTarget = yield* updater(target)
-                    const newState = yield* getValue(selector.set(newTarget, state))
+                    const newTargetResult = updater(target)
+                    if (newTargetResult.type === 'err') {
+                        return newTargetResult
+                    }
+                    const newTarget = newTargetResult.value
+
+                    const newStateResult = selector.set(newTarget, state)
+                    if (newStateResult.type === 'err') {
+                        return newStateResult
+                    }
+                    const newState = newStateResult.value
 
                     const isObjectNewState = typeof newState === 'object' && newState !== null
 
-                    if (isObjectNewState) {
-                        setAccessorCache(newState, accessor, newTarget)
+                    if (isObjectNewState && (Array.isArray(newState) || typeof newState === 'object')) {
+                        setAccessorCache(newState as object | unknown[], accessor, newTarget)
                     }
 
-                    return newState
+                    return Result.ok(newState)
                 }
 
                 const updateRoot = set(updateState)
@@ -323,39 +348,35 @@ export class Accessor<State, Root> {
     prop<Key extends keyof State & string>(key: Key): Accessor<State[Key], Root> {
         return this.transform({
             get(state) {
-                return state[key]
+                return Result.ok(state[key])
             },
             set(newValue, state) {
-                return {
+                return Result.ok({
                     ...state,
                     [key]: newValue,
-                }
+                })
             },
         })
     }
 
     index<Index extends keyof State & number>(index: Index): Accessor<State[Index], Root> {
         return this.transform({
-            *get(state) {
+            get(state) {
                 if (!Array.isArray(state)) {
-                    throw yield* Err.throw(
-                        new AccessorErr(`[koka-accessor] Index ${index} is not applied for an array`),
-                    )
+                    return new AccessorErr(`[koka-accessor] Index ${index} is not applied for an array`)
                 }
 
                 if (index < 0 || index >= state.length) {
-                    throw yield* Err.throw(
-                        new AccessorErr(`[koka-accessor] Index ${index} is out of bounds: ${state.length}`),
-                    )
+                    return new AccessorErr(`[koka-accessor] Index ${index} is out of bounds: ${state.length}`)
                 }
 
-                return state[index] as State[Index]
+                return Result.ok(state[index] as State[Index])
             },
-            *set(newValue, state) {
+            set(newValue, state) {
                 const newState = [...(state as State[Index][])]
                 newState[index] = newValue
 
-                return newState as typeof state
+                return Result.ok(newState as typeof state)
             },
         })
     }
@@ -371,61 +392,59 @@ export class Accessor<State, Root> {
         }
 
         return this.transform<TargetInfo>({
-            *get(list) {
+            get(list) {
                 if (!Array.isArray(list)) {
-                    throw yield* Err.throw(
-                        new AccessorErr(`[koka-accessor] Find ${predicate} is not applied for an array`),
-                    )
+                    return new AccessorErr(`[koka-accessor] Find ${predicate} is not applied for an array`)
                 }
 
                 const index = list.findIndex(predicate)
 
                 if (index === -1) {
-                    throw yield* Err.throw(new AccessorErr(`[koka-accessor] Item not found`))
+                    return new AccessorErr(`[koka-accessor] Item not found`)
                 }
 
                 const target = list[index]
 
-                return {
+                return Result.ok({
                     target,
                     index,
-                }
+                })
             },
             set(itemInfo, list) {
                 const newList = [...(list as ArrayItem<State>[])]
                 newList[itemInfo.index] = itemInfo.target
 
-                return newList as typeof list
+                return Result.ok(newList as typeof list)
             },
         }).prop('target')
     }
 
     match<Matched extends State>(predicate: (state: State) => state is Matched): Accessor<Matched, Root> {
         return this.transform({
-            *get(state) {
+            get(state) {
                 if (!predicate(state)) {
-                    throw yield* Err.throw(new AccessorErr(`[koka-accessor] State does not match by ${predicate}`))
+                    return new AccessorErr(`[koka-accessor] State does not match by ${predicate}`)
                 }
 
-                return state
+                return Result.ok(state)
             },
             set(newState) {
-                return newState
+                return Result.ok(newState)
             },
         })
     }
 
     refine(predicate: (state: State) => boolean): Accessor<State, Root> {
         return this.transform({
-            *get(state) {
+            get(state) {
                 if (!predicate(state)) {
-                    throw yield* Err.throw(new AccessorErr(`[koka-accessor] State does not match by ${predicate}`))
+                    return new AccessorErr(`[koka-accessor] State does not match by ${predicate}`)
                 }
 
-                return state
+                return Result.ok(state)
             },
             set(newState) {
-                return newState
+                return Result.ok(newState)
             },
         })
     }
@@ -453,29 +472,29 @@ export class Accessor<State, Root> {
         }
 
         return this.transform({
-            *get(state) {
+            get(state) {
                 const list = state as ArrayItem<State>[]
 
                 const targetList: Target[] = []
 
                 for (const item of list as ArrayItem<State>[]) {
-                    const target = yield* mapper$.get(item)
-
-                    targetList.push(target)
+                    const targetResult = mapper$.get(item)
+                    if (targetResult.type === 'err') {
+                        return targetResult
+                    }
+                    targetList.push(targetResult.value)
                 }
 
-                return targetList
+                return Result.ok(targetList)
             },
-            *set(targetList, state) {
+            set(targetList, state) {
                 const list = state as ArrayItem<State>[]
 
                 const newList = [] as ArrayItem<State>[]
 
                 if (list.length !== targetList.length) {
-                    throw yield* Err.throw(
-                        new AccessorErr(
-                            `[koka-accessor] List length mismatch: ${list.length} !== ${targetList.length}`,
-                        ),
+                    return new AccessorErr(
+                        `[koka-accessor] List length mismatch: ${list.length} !== ${targetList.length}`,
                     )
                 }
 
@@ -483,15 +502,16 @@ export class Accessor<State, Root> {
                     const item = list[i]
                     const newTarget = targetList[i]
 
-                    const updateItem = mapper$.set(function* () {
-                        return newTarget
-                    })
+                    const updateItem = mapper$.set(() => Result.ok(newTarget))
 
-                    const newItem = yield* updateItem(item)
-                    newList.push(newItem)
+                    const newItemResult = updateItem(item)
+                    if (newItemResult.type === 'err') {
+                        return newItemResult
+                    }
+                    newList.push(newItemResult.value)
                 }
 
-                return newList as State
+                return Result.ok(newList as State)
             },
         })
     }
@@ -520,11 +540,9 @@ export class Accessor<State, Root> {
         }
 
         return this.transform<FilteredInfo>({
-            *get(list) {
+            get(list) {
                 if (!Array.isArray(list)) {
-                    throw yield* Err.throw(
-                        new AccessorErr(`[koka-accessor] Filter ${predicate} is not applied for an array`),
-                    )
+                    return new AccessorErr(`[koka-accessor] Filter ${predicate} is not applied for an array`)
                 }
 
                 let indexRecord: IndexRecord | undefined
@@ -556,13 +574,13 @@ export class Accessor<State, Root> {
                     return true
                 })
 
-                return {
+                return Result.ok({
                     filtered,
                     indexRecord,
                     indexList,
-                }
+                })
             },
-            *set(filteredInfo, list) {
+            set(filteredInfo, list) {
                 const newList = [...(list as ArrayItem<State>[])]
 
                 const { filtered, indexRecord, indexList } = filteredInfo
@@ -592,7 +610,7 @@ export class Accessor<State, Root> {
                     }
                 }
 
-                return newList as State
+                return Result.ok(newList as State)
             },
         }).prop('filtered')
     }
