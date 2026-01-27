@@ -1,4 +1,3 @@
-import * as Result from 'koka/result'
 import * as Accessor from '../src/koka-accessor.ts'
 
 describe('Accessor', () => {
@@ -137,8 +136,8 @@ describe('Accessor', () => {
 
     describe('map()', () => {
         const mapAccessor = Accessor.root<number[]>().map({
-            get: (n) => Result.ok(n * 2),
-            set: (newN: number) => Result.ok(newN / 2),
+            get: (n) => Accessor.ok(n * 2),
+            set: (newN: number) => Accessor.ok(newN / 2),
         })
 
         it('should map array items', () => {
@@ -315,8 +314,8 @@ describe('Accessor', () => {
             const accessor = Accessor.root<{ value: number }[]>()
                 .map((item) => item.prop('value'))
                 .map({
-                    get: (n) => Result.ok(n * 2),
-                    set: (newN: number) => Result.ok(newN / 2),
+                    get: (n) => Accessor.ok(n * 2),
+                    set: (newN: number) => Accessor.ok(newN / 2),
                 })
 
             const arr = [1, 2, 3].map((n) => ({ value: n }))
@@ -436,8 +435,8 @@ describe('Accessor', () => {
                 .prop('a')
                 .refine((arr: number[]) => arr.length > 0)
                 .map({
-                    get: (value) => Result.ok(value * 2),
-                    set: (newValue: number) => Result.ok(newValue / 2),
+                    get: (value) => Accessor.ok(value * 2),
+                    set: (newValue: number) => Accessor.ok(newValue / 2),
                 })
 
             const result = Accessor.get({ a: [1, 2, 3] }, accessor)

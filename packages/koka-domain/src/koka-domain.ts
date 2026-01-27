@@ -781,13 +781,17 @@ function* getDomainState<State, Root>(
     const queryTree = yield* Opt.get(QueryTracerOpt)
 
     const rootState = domain.store.getState()
-    const state = yield* Accessor.get(rootState, domain.accessor)
+    const stateResult = Accessor.get(rootState, domain.accessor)
 
-    if (queryTree) {
-        queryTree.states.push(state)
+    if (stateResult.type === 'err') {
+        throw yield* Err.throw(stateResult) as any
     }
 
-    return state
+    if (queryTree) {
+        queryTree.states.push(stateResult.value)
+    }
+
+    return stateResult.value
 }
 
 type DomainStorage = {
@@ -797,7 +801,9 @@ type DomainStorage = {
 
 const domainStorages = new WeakMap<PureDomain<any, any>, DomainStorage>()
 
-export function* get<State, Root>(domain: PureDomain<State, Root>): Generator<Accessor.AccessorErr | QueryOpt, State> {
+export function* get<State, Root>(
+    domain: PureDomain<State, Root>,
+): Generator<Accessor.AccessorErr | QueryOpt | Koka.Final, State> {
     const domainStorage = domainStorages.get(domain)
     const parentQueryStorage = yield* Opt.get(QueryStorageOpt)
 
@@ -811,7 +817,7 @@ export function* get<State, Root>(domain: PureDomain<State, Root>): Generator<Ac
                 return result.value as State
             }
 
-            throw yield* Err.throw(result) as any
+            throw yield* Err.throw(result)
         }
     }
 
@@ -839,10 +845,10 @@ export function* set<State, Root>(
 
     const rootState = domain.store.getState()
 
-    const newRootState = yield* Accessor.set(rootState, domain.accessor, function* (state) {
+    const result = Accessor.set(rootState, domain.accessor, function (state) {
         if (typeof setStateInput !== 'function') {
             if (shallowEqual(state, setStateInput)) {
-                return state
+                return Accessor.ok(state)
             }
 
             if (commandTree) {
@@ -851,15 +857,23 @@ export function* set<State, Root>(
                     next: setStateInput,
                 })
             }
-            return setStateInput
+            return Accessor.ok(setStateInput)
         }
 
         const result = (setStateInput as Accessor.Updater<State> | ((state: State) => State))(state)
 
-        const nextState = yield* Accessor.getValue(result)
+        let nextState: State
+        if (Accessor.isAccessorResult(result)) {
+            if (result.type === 'err') {
+                return result
+            }
+            nextState = result.value
+        } else {
+            nextState = result
+        }
 
         if (shallowEqual(nextState, state)) {
-            return state
+            return Accessor.ok(state)
         }
 
         if (commandTree) {
@@ -869,12 +883,15 @@ export function* set<State, Root>(
             })
         }
 
-        return nextState
+        return Accessor.ok(nextState)
     })
 
-    domain.store.setState(newRootState)
-
-    return newRootState
+    if (result.type === 'err') {
+        throw yield* Err.throw(result)
+    } else {
+        domain.store.setState(result.value)
+        return result.value
+    }
 }
 
 const previousResultWeakMap = new WeakMap<PureDomain<any, any>, Result.Result<any, any>>()

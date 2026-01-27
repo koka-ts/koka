@@ -1,9 +1,36 @@
-import * as Err from 'koka/err'
-import * as Result from 'koka/result'
+export type AccessorErr = {
+    type: 'err'
+    name: 'koka-accessor/accessor-err'
+    error: string
+}
 
-export class AccessorErr extends Err.Err('koka-accessor/accessor-err')<string> {}
+export type AccessorOk<T> = {
+    type: 'ok'
+    value: T
+}
 
-export type AccessorResult<T> = Result.Ok<T> | AccessorErr
+export function ok<T>(value: T): AccessorOk<T> {
+    return {
+        type: 'ok',
+        value,
+    }
+}
+
+export function err(error: string): AccessorErr {
+    return {
+        type: 'err',
+        name: 'koka-accessor/accessor-err',
+        error,
+    }
+}
+
+export type AccessorResult<T> = AccessorOk<T> | AccessorErr
+
+export function isAccessorResult<T>(value: unknown): value is AccessorResult<T> {
+    return (
+        typeof value === 'object' && value !== null && 'type' in value && (value.type === 'ok' || value.type === 'err')
+    )
+}
 
 export type Getter<State, Root> = (root: Root) => AccessorResult<State>
 
@@ -114,7 +141,7 @@ function createAccessorProxy<State>(path: AccessorProxyPath = []): AccessorProxy
 export function root<Root>(): Accessor<Root, Root> {
     return new Accessor({
         get(root) {
-            return Result.ok(root)
+            return ok(root)
         },
         set: (updater) => {
             return (root) => {
@@ -122,7 +149,7 @@ export function root<Root>(): Accessor<Root, Root> {
                 if (result.type === 'err') {
                     return result
                 }
-                return Result.ok(result.value)
+                return ok(result.value)
             }
         },
     })
@@ -145,7 +172,7 @@ export function object<T extends Record<string, AnyAccessor>>(
                     object[key] = result.value
                 }
 
-                return Result.ok({
+                return ok({
                     oldObject: object,
                     newObject: object,
                 })
@@ -161,14 +188,14 @@ export function object<T extends Record<string, AnyAccessor>>(
                     }
 
                     // @ts-ignore expected
-                    const result = accessors[key].set(() => Result.ok(newValue as any))(currentRoot)
+                    const result = accessors[key].set(() => ok(newValue as any))(currentRoot)
                     if (result.type === 'err') {
                         return result
                     }
                     currentRoot = result.value
                 }
 
-                return Result.ok(currentRoot)
+                return ok(currentRoot)
             },
         })
         .prop('newObject')
@@ -180,23 +207,23 @@ export function optional<State, Root>(accessor: Accessor<State, Root>): Accessor
             const result = accessor.get(root)
 
             if (result.type === 'ok') {
-                return Result.ok(result.value)
+                return ok(result.value)
             }
-            return Result.ok(undefined)
+            return ok(undefined)
         },
         set(state, root) {
             if (state === undefined) {
-                return Result.ok(root)
+                return ok(root)
             }
 
             const newState = state as State
 
-            const result = accessor.set(() => Result.ok(newState))(root)
+            const result = accessor.set(() => ok(newState))(root)
             if (result.type === 'err') {
                 return result
             }
 
-            return Result.ok(result.value)
+            return ok(result.value)
         },
     })
 }
@@ -215,19 +242,15 @@ export function set<State, Root>(
         return accessor.set((state) => {
             const result = updater(state)
 
-            // Check if it's already an AccessorResult (Updater<State>)
-            if (result && typeof result === 'object' && 'type' in result) {
-                if (result.type === 'err' || result.type === 'ok') {
-                    return result as AccessorResult<State>
-                }
+            if (isAccessorResult(result)) {
+                return result
             }
 
-            // Otherwise it's a plain function that returns State
-            return Result.ok(result as State)
+            return ok(result)
         })(root)
     } else {
         const state = stateOrUpdater as State
-        return accessor.set(() => Result.ok(state))(root)
+        return accessor.set(() => ok(state))(root)
     }
 }
 
@@ -254,7 +277,7 @@ export class Accessor<State, Root> {
                 let accessorMap = isObjectRoot ? accessorWeakMap.get(root) : null
 
                 if (accessorMap?.has(accessor)) {
-                    return Result.ok(accessorMap.get(accessor)! as Target)
+                    return ok(accessorMap.get(accessor)! as Target)
                 }
 
                 const stateResult = get(root)
@@ -274,7 +297,7 @@ export class Accessor<State, Root> {
                         setAccessorCache(root, accessor, target)
                     }
 
-                    return Result.ok(target)
+                    return ok(target)
                 }
 
                 const targetResult = selector.get(state)
@@ -291,7 +314,7 @@ export class Accessor<State, Root> {
                     setAccessorCache(root, accessor, target)
                 }
 
-                return Result.ok(target)
+                return ok(target)
             },
             set: (updater) => {
                 const updateState = (state: State): AccessorResult<State> => {
@@ -333,7 +356,7 @@ export class Accessor<State, Root> {
                         setAccessorCache(newState as object | unknown[], accessor, newTarget)
                     }
 
-                    return Result.ok(newState)
+                    return ok(newState)
                 }
 
                 const updateRoot = set(updateState)
@@ -348,10 +371,10 @@ export class Accessor<State, Root> {
     prop<Key extends keyof State & string>(key: Key): Accessor<State[Key], Root> {
         return this.transform({
             get(state) {
-                return Result.ok(state[key])
+                return ok(state[key])
             },
             set(newValue, state) {
-                return Result.ok({
+                return ok({
                     ...state,
                     [key]: newValue,
                 })
@@ -363,20 +386,20 @@ export class Accessor<State, Root> {
         return this.transform({
             get(state) {
                 if (!Array.isArray(state)) {
-                    return new AccessorErr(`[koka-accessor] Index ${index} is not applied for an array`)
+                    return err(`[koka-accessor] Index ${index} is not applied for an array`)
                 }
 
                 if (index < 0 || index >= state.length) {
-                    return new AccessorErr(`[koka-accessor] Index ${index} is out of bounds: ${state.length}`)
+                    return err(`[koka-accessor] Index ${index} is out of bounds: ${state.length}`)
                 }
 
-                return Result.ok(state[index] as State[Index])
+                return ok(state[index] as State[Index])
             },
             set(newValue, state) {
                 const newState = [...(state as State[Index][])]
                 newState[index] = newValue
 
-                return Result.ok(newState as typeof state)
+                return ok(newState as typeof state)
             },
         })
     }
@@ -394,18 +417,18 @@ export class Accessor<State, Root> {
         return this.transform<TargetInfo>({
             get(list) {
                 if (!Array.isArray(list)) {
-                    return new AccessorErr(`[koka-accessor] Find ${predicate} is not applied for an array`)
+                    return err(`[koka-accessor] Find ${predicate} is not applied for an array`)
                 }
 
                 const index = list.findIndex(predicate)
 
                 if (index === -1) {
-                    return new AccessorErr(`[koka-accessor] Item not found`)
+                    return err(`[koka-accessor] Item not found`)
                 }
 
                 const target = list[index]
 
-                return Result.ok({
+                return ok({
                     target,
                     index,
                 })
@@ -414,7 +437,7 @@ export class Accessor<State, Root> {
                 const newList = [...(list as ArrayItem<State>[])]
                 newList[itemInfo.index] = itemInfo.target
 
-                return Result.ok(newList as typeof list)
+                return ok(newList as typeof list)
             },
         }).prop('target')
     }
@@ -423,13 +446,13 @@ export class Accessor<State, Root> {
         return this.transform({
             get(state) {
                 if (!predicate(state)) {
-                    return new AccessorErr(`[koka-accessor] State does not match by ${predicate}`)
+                    return err(`[koka-accessor] State does not match by ${predicate}`)
                 }
 
-                return Result.ok(state)
+                return ok(state)
             },
             set(newState) {
-                return Result.ok(newState)
+                return ok(newState)
             },
         })
     }
@@ -438,13 +461,13 @@ export class Accessor<State, Root> {
         return this.transform({
             get(state) {
                 if (!predicate(state)) {
-                    return new AccessorErr(`[koka-accessor] State does not match by ${predicate}`)
+                    return err(`[koka-accessor] State does not match by ${predicate}`)
                 }
 
-                return Result.ok(state)
+                return ok(state)
             },
             set(newState) {
-                return Result.ok(newState)
+                return ok(newState)
             },
         })
     }
@@ -485,7 +508,7 @@ export class Accessor<State, Root> {
                     targetList.push(targetResult.value)
                 }
 
-                return Result.ok(targetList)
+                return ok(targetList)
             },
             set(targetList, state) {
                 const list = state as ArrayItem<State>[]
@@ -493,16 +516,14 @@ export class Accessor<State, Root> {
                 const newList = [] as ArrayItem<State>[]
 
                 if (list.length !== targetList.length) {
-                    return new AccessorErr(
-                        `[koka-accessor] List length mismatch: ${list.length} !== ${targetList.length}`,
-                    )
+                    return err(`[koka-accessor] List length mismatch: ${list.length} !== ${targetList.length}`)
                 }
 
                 for (let i = 0; i < list.length; i++) {
                     const item = list[i]
                     const newTarget = targetList[i]
 
-                    const updateItem = mapper$.set(() => Result.ok(newTarget))
+                    const updateItem = mapper$.set(() => ok(newTarget))
 
                     const newItemResult = updateItem(item)
                     if (newItemResult.type === 'err') {
@@ -511,7 +532,7 @@ export class Accessor<State, Root> {
                     newList.push(newItemResult.value)
                 }
 
-                return Result.ok(newList as State)
+                return ok(newList as State)
             },
         })
     }
@@ -542,7 +563,7 @@ export class Accessor<State, Root> {
         return this.transform<FilteredInfo>({
             get(list) {
                 if (!Array.isArray(list)) {
-                    return new AccessorErr(`[koka-accessor] Filter ${predicate} is not applied for an array`)
+                    return err(`[koka-accessor] Filter ${predicate} is not applied for an array`)
                 }
 
                 let indexRecord: IndexRecord | undefined
@@ -574,7 +595,7 @@ export class Accessor<State, Root> {
                     return true
                 })
 
-                return Result.ok({
+                return ok({
                     filtered,
                     indexRecord,
                     indexList,
@@ -610,7 +631,7 @@ export class Accessor<State, Root> {
                     }
                 }
 
-                return Result.ok(newList as State)
+                return ok(newList as State)
             },
         }).prop('filtered')
     }

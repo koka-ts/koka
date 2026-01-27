@@ -6,7 +6,6 @@ import { useDomainState } from 'koka-react'
 import { type TodoApp, TodoAppDomain } from './domain'
 import './index.css'
 import App from './App.tsx'
-import './koka-accessor-new.ts'
 
 type AppState = {
     todoApp: TodoApp
@@ -194,8 +193,8 @@ const store = new Domain.Store<AppState>({
     plugins: [PrettyLogger()],
 })
 
-// createRoot(document.getElementById('root')!).render(
-//     <StrictMode>
-//         <Main domain={store.domain} />
-//     </StrictMode>,
-// )
+createRoot(document.getElementById('root')!).render(
+    <StrictMode>
+        <Main domain={store.domain} />
+    </StrictMode>,
+)
