@@ -197,8 +197,9 @@ class FinalPhase<Yield extends AnyEff, Return> extends EffPhase {
             }
 
             const finalGen = readEffector(this.finalEffector)
-            let result = finalGen.next()
+
             try {
+                let result = finalGen.next()
                 while (!result.done) {
                     const effect = result.value
                     if (effect.type === 'final') {

@@ -299,6 +299,8 @@ type DomainId = string
 
 type PathKey = string
 
+type DomainKey = `${DomainCtorId}:${PathKey}`
+
 type PathTreeChildKey = string | number
 
 type AnyResult = Result<any>
@@ -306,72 +308,166 @@ type AnyResult = Result<any>
 type DomainStorage = {
     domain: AnyDomain
     state: unknown
-    abortSignal: AbortSignal
-    abortController: AbortController
-    subscribers: Set<AnySubscriber>
+
+    effectContext?: EffectContext
 }
 
-type DomainWeakMap = WeakMap<AnyDomain, DomainStorage>
+type DomainStorageMap = Map<DomainKey, DomainStorage>
 
-type RootPathTree = {
-    type: 'root'
-    state: unknown
-    children: Map<PathTreeChildKey, PathTreeChild>
-    effectfulDomains: Map<DomainId, AnyDomain>
+type StoreOptions<Root> = {
+    state: Root
+    effect?: boolean
 }
-
-type FieldPathTree = {
-    type: 'field'
-    name: string
-    state: unknown
-    entityKey?: string
-    parent: PathTree
-    children: Map<PathTreeChildKey, PathTreeChild>
-    subscribers: Set<AnySubscriber>
-}
-
-type IndexPathTree = {
-    type: 'index'
-    index: number
-    state: unknown
-    entityKey?: string
-    parent: PathTree
-    children: Map<PathTreeChildKey, PathTreeChild>
-    subscribers: Set<AnySubscriber>
-}
-
-type PathTreeChild = FieldPathTree | IndexPathTree
-
-type PathTree = RootPathTree | PathTreeChild
-
-type PathTreeMap = Map<PathKey, PathTree>
 
 class Store<Root> {
     private listeners: Set<(state: Root, path: PathLink) => void> = new Set()
+    private unsubscribeListeners: Set<() => void> = new Set()
     state: Root
 
-    enabledEffects: boolean = false
-
-    private pathTreeMap: PathTreeMap = new Map()
-
-    constructor(initialState: Root) {
-        this.state = initialState
+    constructor(options: StoreOptions<Root>) {
+        this.state = options.state
+        this.enabledEffects = options.effect ?? false
     }
 
-    subscribe(listener: (state: Root) => void): () => void {
+    subscribe(listener: (state: Root) => void, onUnsubscribe?: () => void): () => void {
         this.listeners.add(listener)
-        return () => this.listeners.delete(listener)
+        if (onUnsubscribe) {
+            this.unsubscribeListeners.add(onUnsubscribe)
+        }
+
+        return () => {
+            this.listeners.delete(listener)
+            if (onUnsubscribe && this.unsubscribeListeners.has(onUnsubscribe)) {
+                onUnsubscribe()
+                this.unsubscribeListeners.delete(onUnsubscribe)
+            }
+        }
     }
 
     commit(newState: Root, path: PathLink): void {
         if (this.state !== newState) {
             this.state = newState
+            this.verifyDomainStorageMap()
             this.listeners.forEach((listener) => listener(this.state, path))
         }
     }
-}
 
-const effectMethodsStorage = new WeakMap<new (...args: any[]) => any, Map<string, EffectMethod>>()
+    private verifyDomainStorageMap() {
+        for (const [domainKey, domainStorage] of this.domainStorageMap) {
+            const result = domainStorage.domain.get()
+
+            if (!result.ok) {
+                this.stopEffect(domainStorage.domain)
+                this.effectfulDomainStorageMap.delete(domainStorage.domain)
+                this.domainStorageMap.delete(domainKey)
+            }
+        }
+    }
+
+    enabledEffects: boolean = false
+
+    private domainStorageMap: DomainStorageMap = new Map()
+
+    private effectfulDomainStorageMap: Map<AnyDomain, DomainStorage> = new Map()
+
+    getOrCreateDomain<Local, Ctor extends DomainCtor<Local, Root>>(
+        DomainCtor: Ctor,
+        accessor: Accessor<Local, Root>,
+        parent?: Domain<any, Root>,
+    ): InstanceType<Ctor> {
+        const result = Accessor.get(accessor, this.state)
+
+        if (!result.ok) {
+            return new DomainCtor(this, accessor, parent) as InstanceType<Ctor>
+        }
+
+        const pathKey = createLogicalKey(result.path)
+        const domainCtorId = getDomainCtorId(DomainCtor)
+
+        const domainKey: DomainKey = `${domainCtorId}:${pathKey}`
+
+        let domainStorage = this.domainStorageMap.get(domainKey)
+
+        if (!domainStorage) {
+            domainStorage = {
+                domain: new DomainCtor(this, accessor, parent),
+                state: result.value,
+            }
+
+            this.domainStorageMap.set(domainKey, domainStorage)
+
+            if (getEffectfulMethods(domainStorage.domain)) {
+                this.effectfulDomainStorageMap.set(domainStorage.domain, domainStorage)
+
+                const domain = domainStorage.domain
+                const unsubscribe = domain.subscribe(
+                    () => {
+                        this.startEffect(domain)
+                    },
+                    () => {
+                        this.stopEffect(domain)
+                    },
+                )
+            }
+        }
+
+        return domainStorage.domain as InstanceType<Ctor>
+    }
+
+    stopEffect<Local>(domain: Domain<Local, Root>): void {
+        const domainStorage = this.effectfulDomainStorageMap.get(domain)
+
+        if (!domainStorage) {
+            return
+        }
+
+        domainStorage.effectContext?.abortController.abort()
+        domainStorage.effectContext = undefined
+    }
+
+    startEffect<Local>(domain: Domain<Local, Root>): void {
+        const domainStorage = this.effectfulDomainStorageMap.get(domain)
+
+        if (!domainStorage) {
+            return
+        }
+
+        this.stopEffect(domain)
+
+        const effectContext: EffectContext = {
+            abortSignal: new AbortSignal(),
+            abortController: new AbortController(),
+        }
+
+        domainStorage.effectContext = effectContext
+
+        const methods = getEffectfulMethods(domain) ?? []
+
+        for (const method of methods.values()) {
+            method.call(domainStorage.domain, effectContext)
+        }
+    }
+
+    startEffects(): void {
+        if (!this.enabledEffects) {
+            return
+        }
+
+        for (const domainStorage of this.effectfulDomainStorageMap.values()) {
+            this.startEffect(domainStorage.domain)
+        }
+    }
+
+    stopEffects(): void {
+        if (!this.enabledEffects) {
+            return
+        }
+
+        for (const domainStorage of this.effectfulDomainStorageMap.values()) {
+            this.stopEffect(domainStorage.domain)
+        }
+    }
+}
 
 type DomainStatic = Omit<typeof Domain, 'prototype'>
 
@@ -394,98 +490,79 @@ const getDomainCtorId = (DomainCtor: DomainCtor<any, any>): string => {
     return id
 }
 
-const getDomainPathKey = (domain: AnyDomain): PathKey => {
-    const result = domain.result
-    if (!result.ok) {
-        throw new Error(result.error)
-    }
-    return createLogicalKey(result.path)
-}
-
 type AnyDomain = Domain<any, any>
 
 class Domain<Local, Root = any> {
     readonly store: Store<Root>
     readonly accessor: Accessor<Local, Root>
+    readonly parent?: Domain<any, Root>
 
-    constructor(store: Store<Root>, accessor: Accessor<Local, Root>) {
+    constructor(store: Store<Root>, accessor: Accessor<Local, Root>, parent?: Domain<any, Root>) {
         this.store = store
         this.accessor = accessor
+        this.parent = parent
     }
 
-    get state(): Local {
-        const result = this.result
+    update(updater: (currentValue: Local) => Local): Result<Local> {
+        const result = this.get()
 
-        if (result.ok) {
-            return result.value
+        if (!result.ok) {
+            return result
         }
 
-        throw new Error(result.error)
-    }
+        const newState = updater(result.value)
 
-    set state(newValue: Local) {
-        const result = Accessor.set(this.accessor, this.store.state, newValue)
-
-        if (result.ok) {
-            this.store.commit(result.value, result.path)
-        } else {
-            throw new Error(result.error)
-        }
-    }
-
-    get result(): Result<Local> {
-        return Accessor.get(this.accessor, this.store.state)
-    }
-
-    update(updater: (currentValue: Local) => Local): void {
-        const state = this.state
-
-        const newState = updater(state)
-
-        this.set(newState)
+        return this.set(newState)
     }
 
     get(): Result<Local> {
         return Accessor.get(this.accessor, this.store.state)
     }
 
-    set(newValue: Local): void {
+    set(newValue: Local): Result<Local> {
         const result = Accessor.set(this.accessor, this.store.state, newValue)
+
         if (result.ok) {
             this.store.commit(result.value, result.path)
         }
+
+        return this.get()
     }
 
     field<Key extends keyof Local & string, Value extends Local[Key]>(
         key: Key,
         getKey?: GetKey<Value>,
     ): Domain<Value, Root> {
-        return new Domain(this.store, this.accessor.field(key, getKey))
+        return this.store.getOrCreateDomain(Domain<Value, Root>, this.accessor.field(key, getKey), this)
     }
 
     index<Item = Local extends Array<infer ArrayItem> ? ArrayItem : never>(
         targetIndex: number,
         getKey?: GetKey<Item>,
     ): Domain<Item, Root> {
-        return new Domain(this.store, (this.accessor as unknown as Accessor<Item[], Root>).index(targetIndex, getKey))
+        return this.store.getOrCreateDomain(
+            Domain<Item, Root>,
+            (this.accessor as unknown as Accessor<Item[], Root>).index(targetIndex, getKey),
+            this,
+        )
     }
 
     match<Matched extends Local>(predicate: (local: Local) => local is Matched): Domain<Matched, Root> {
-        return new Domain(this.store, this.accessor.match(predicate))
+        return this.store.getOrCreateDomain(Domain<Matched, Root>, this.accessor.match(predicate), this)
     }
 
     find<Item = Local extends Array<infer ArrayItem> ? ArrayItem : never>(
         predicate: (item: Item, index: number) => boolean,
         getKey?: GetKey<Item>,
     ): Domain<Item, Root> {
-        return new Domain(this.store, this.accessor.find(predicate, getKey))
+        return this.store.getOrCreateDomain(Domain<Item, Root>, this.accessor.find(predicate, getKey), this)
     }
 
     use<D extends DomainCtor<Local, Root>>(DomainCtor: D): InstanceType<D> {
-        return new DomainCtor(this.store, this.accessor) as InstanceType<D>
+        return this.store.getOrCreateDomain(DomainCtor, this.accessor, this) as InstanceType<D>
     }
 
-    subscribe(onNext: (state: Local) => void): () => void {
+    subscribe(onNext: (state: Local) => void, onUnsubscribe?: () => void): () => void {
         let lastValue: Local | undefined
         let hasEmitted = false
 
@@ -506,11 +583,9 @@ class Domain<Local, Root = any> {
                     onNext(result.value)
                 }
             }
-        })
+        }, onUnsubscribe)
 
-        return () => {
-            unsubscribe()
-        }
+        return unsubscribe
     }
 }
 
@@ -520,6 +595,13 @@ type EffectContext = {
 }
 
 type EffectMethod = (effectContext: EffectContext) => unknown
+
+const effectMethodsStorage = new WeakMap<new (...args: any[]) => any, Map<string, EffectMethod>>()
+
+const getEffectfulMethods = (domain: AnyDomain): Map<string, EffectMethod> | undefined => {
+    let methods = effectMethodsStorage.get(domain.constructor as new (...args: any[]) => any)
+    return methods
+}
 
 function effect() {
     return function <This, Value extends EffectMethod>(

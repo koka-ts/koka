@@ -2163,7 +2163,7 @@ describe('Task methods with Koka finally behavior', () => {
     })
 
     it('should handle mixed effects in finally block with Task.all', async () => {
-        const actions: string[] = []
+        let actions: string[] = []
         class LogCtx extends Ctx.Ctx('LogCtx')<(msg: string) => void> {}
         class CleanupError extends Err.Err('CleanupError')<string> {}
         class CleanupOpt extends Opt.Opt('CleanupOpt')<string> {}
@@ -2173,8 +2173,13 @@ describe('Task methods with Koka finally behavior', () => {
                 Task.all([
                     function* () {
                         const log = yield* Ctx.get(LogCtx)
-                        log('main')
-                        return 'done'
+                        log('main1')
+                        return 'done1'
+                    },
+                    function* () {
+                        const log = yield* Ctx.get(LogCtx)
+                        log('main2')
+                        return 'done2'
                     },
                 ]),
             ).finally(function* () {
@@ -2209,8 +2214,15 @@ describe('Task methods with Koka finally behavior', () => {
         )
 
         expect(result).toBe('handled')
-        expect(actions).toEqual(['main', 'cleanup-start', 'thorough cleanup', 'error: thorough cleanup failed'])
+        expect(actions).toEqual([
+            'main1',
+            'main2',
+            'cleanup-start',
+            'thorough cleanup',
+            'error: thorough cleanup failed',
+        ])
 
+        actions = []
         const result2 = await Koka.runAsync(
             Koka.try(program).handle({
                 LogCtx: (msg: string) => actions.push(msg),
@@ -2221,16 +2233,9 @@ describe('Task methods with Koka finally behavior', () => {
                 },
             }),
         )
-        expect(result2).toEqual(['done'])
-        expect(actions).toEqual([
-            'main',
-            'cleanup-start',
-            'thorough cleanup',
-            'error: thorough cleanup failed',
-            'main',
-            'cleanup-start',
-            'cleanup-end',
-        ])
+
+        expect(result2).toEqual(['done1', 'done2'])
+        expect(actions).toEqual(['main1', 'main2', 'cleanup-start', 'cleanup-end'])
     })
 
     it('should handle TaskProducer with finally with Task.all', async () => {

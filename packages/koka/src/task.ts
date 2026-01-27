@@ -144,17 +144,17 @@ export function* drain<Yield extends Koka.AnyEff, Return>(inputs: TaskSource<Ret
     })
 }
 
-type TaskResultLinkList<TaskReturn> = {
-    value: TaskResult<TaskReturn>
-    next: TaskResultLinkList<TaskReturn> | undefined
+type LinkList<T> = {
+    value: T
+    next: LinkList<T> | undefined
 }
 
-class TaskResultLinkListManager<TaskReturn> {
-    private tail: TaskResultLinkList<TaskReturn> | undefined = undefined
-    private head: TaskResultLinkList<TaskReturn> | undefined = undefined
+class LinkListManager<T> {
+    private tail: LinkList<T> | undefined = undefined
+    private head: LinkList<T> | undefined = undefined
 
-    add(value: TaskResult<TaskReturn>) {
-        const link: TaskResultLinkList<TaskReturn> = {
+    add(value: T) {
+        const link: LinkList<T> = {
             value,
             next: undefined,
         }
@@ -169,12 +169,12 @@ class TaskResultLinkListManager<TaskReturn> {
         }
     }
 
-    next(): TaskResult<TaskReturn> | undefined {
+    next(): T | undefined {
         if (!this.head) {
             return undefined
         }
 
-        const result = this.head.value
+        const value = this.head.value
         this.head = this.head.next
 
         // If head becomes empty, tail must also be cleared to prevent stale reference
@@ -183,7 +183,11 @@ class TaskResultLinkListManager<TaskReturn> {
             this.tail = undefined
         }
 
-        return result
+        return value
+    }
+
+    isEmpty() {
+        return this.head === undefined
     }
 }
 
@@ -265,7 +269,7 @@ export function* concurrent<
         },
     }
 
-    let jobQueue: (() => ReturnType<typeof processTask>)[] = []
+    const jobManager = new LinkListManager<Generator<TaskYield, void>>()
 
     let asyncCount = 0
 
@@ -274,25 +278,26 @@ export function* concurrent<
         promise.then(
             (value) => {
                 asyncCount--
-                jobQueue.push(() => processTask(index, gen, gen.next(value)))
+                jobManager.add(processTask(index, gen, () => gen.next(value)))
                 notifyScheduler()
             },
             (error: unknown) => {
                 asyncCount--
-                jobQueue.push(() => processTask(index, gen, gen.throw(error)))
+                jobManager.add(processTask(index, gen, () => gen.throw(error)))
                 notifyScheduler()
             },
         )
     }
 
-    const taskResultManager = new TaskResultLinkListManager<TaskReturn>()
+    const taskResultManager = new LinkListManager<TaskResult<TaskReturn>>()
 
     function* processTask(
         index: number,
         gen: Generator<TaskYield, TaskReturn>,
-        result: IteratorResult<TaskYield, TaskReturn>,
+        getResult: () => IteratorResult<TaskYield, TaskReturn>,
     ): Generator<TaskYield, void> {
         try {
+            let result = getResult()
             while (!result.done) {
                 const effect = result.value
                 if (effect.type === 'async') {
@@ -302,6 +307,14 @@ export function* concurrent<
                     result = gen.next(yield effect)
                 }
             }
+
+            result.done satisfies true
+            activeTasksMap.delete(index)
+            taskResultManager.add({
+                type: 'task-ok',
+                index,
+                value: result.value as TaskReturn,
+            })
         } catch (error) {
             activeTasksMap.delete(index)
             taskResultManager.add({
@@ -309,16 +322,7 @@ export function* concurrent<
                 index,
                 error,
             })
-            return
         }
-
-        result.done satisfies true
-        activeTasksMap.delete(index)
-        taskResultManager.add({
-            type: 'task-ok',
-            index,
-            value: result.value as TaskReturn,
-        })
     }
 
     let taskIndexCounter = 0
@@ -331,6 +335,25 @@ export function* concurrent<
         let result = reducerGen.next()
 
         mainLoop: while (!result.done) {
+            let job = jobManager.next()
+
+            while (job) {
+                yield* job
+                job = jobManager.next()
+            }
+
+            while (activeTasksMap.size < config.maxConcurrency) {
+                const gen = taskProvider.next()
+                if (!gen) {
+                    break
+                }
+
+                const index = taskIndexCounter++
+                activeTasksMap.set(index, gen)
+
+                yield* processTask(index, gen, () => gen.next())
+            }
+
             const effect = result.value
 
             if (effect.type !== 'task-wait-next' && effect.type !== 'task-wait-result') {
@@ -339,29 +362,14 @@ export function* concurrent<
             }
 
             if (isEnded) {
-                throw new Error(
-                    `Unexpected calling stream.${
-                        effect.type === 'task-wait-next' ? 'next' : 'result'
-                    }() when stream is ended`,
-                )
+                const method = effect.type === 'task-wait-next' ? 'next' : 'result'
+                result = reducerGen.throw(new Error(`Unexpected stream.${method} call after concurrent task is ended`))
+                continue
             }
 
-            if (jobQueue.length > 0) {
-                const currentJobQueue = jobQueue
-                jobQueue = []
+            let taskResult = taskResultManager.next()
 
-                for (const job of currentJobQueue) {
-                    yield* job()
-                }
-            }
-
-            while (true) {
-                const taskResult = taskResultManager.next()
-
-                if (!taskResult) {
-                    break
-                }
-
+            while (taskResult) {
                 if (effect.type === 'task-wait-next') {
                     if (taskResult.type === 'task-ok') {
                         result = reducerGen.next(taskResult)
@@ -385,27 +393,17 @@ export function* concurrent<
                 }
 
                 if (result.done) {
-                    return result.value
+                    break mainLoop
                 }
 
                 if (result.value.type !== 'task-wait-next' && result.value.type !== 'task-wait-result') {
                     continue mainLoop
                 }
+
+                taskResult = taskResultManager.next()
             }
 
-            while (activeTasksMap.size < config.maxConcurrency) {
-                const gen = taskProvider.next()
-                if (!gen) {
-                    break
-                }
-
-                const index = taskIndexCounter++
-                activeTasksMap.set(index, gen)
-
-                yield* processTask(index, gen, gen.next())
-            }
-
-            if (activeTasksMap.size === 0) {
+            if (jobManager.isEmpty() && activeTasksMap.size === 0) {
                 isEnded = true
                 result = reducerGen.next(TaskEnd)
                 continue
