@@ -201,6 +201,37 @@ export function object<T extends Record<string, AnyAccessor>>(
         .prop('newObject')
 }
 
+export function union<Root, Accessors extends Accessor<any, Root>[]>(
+    accessors: Accessors,
+): Accessor<InferAccessorState<Accessors[number]>, Root> {
+    const unionAccessor: Accessor<InferAccessorState<Accessors[number]>, Root> = new Accessor({
+        get(root) {
+            for (const accessor of accessors) {
+                const result = accessor.get(root)
+                if (result.type !== 'err') {
+                    return result
+                }
+            }
+
+            return err('[koka-accessor] Union accessors did not return a value')
+        },
+        set(updateState) {
+            return (root) => {
+                for (const accessor of accessors) {
+                    const result = set(root, accessor, updateState)
+                    if (result.type === 'ok') {
+                        return result
+                    }
+                }
+
+                return err('[koka-accessor] Union accessors did not set a value')
+            }
+        },
+    })
+
+    return unionAccessor
+}
+
 export function optional<State, Root>(accessor: Accessor<State, Root>): Accessor<State | undefined, Root> {
     return root<Root>().transform<State | undefined>({
         get(root) {

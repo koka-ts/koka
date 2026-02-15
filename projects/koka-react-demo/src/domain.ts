@@ -33,8 +33,8 @@ export type Todo = {
 }
 
 export class TodoDomain extends Domain.Domain<Todo> {
-    text$ = new TextDomain(this.prop('text'))
-    done$ = new BoolDomain(this.prop('done'));
+    text$ = this.use(TextDomain, this.state.prop('text')) as TextDomain
+    done$ = this.use(BoolDomain, this.state.prop('done')) as BoolDomain;
 
     @Domain.command()
     *updateTodoText(text: string) {
@@ -106,19 +106,26 @@ export class TodoListDomain extends Domain.Domain<Todo[]> {
         yield* this.removeTodo(event.payload.todoId)
     }
 
-    todo(id: number) {
-        const options = this.find((todo) => todo.id === id)
-        return new TodoDomain(options) as TodoDomain
+    todo(id: number): TodoDomain {
+        return this.use(TodoDomain, this.state.findId('id', id))
     }
 
-    getKey = (todo: Todo) => {
-        return todo.id
-    }
-
-    completedTodoList$ = this.filter((todo) => todo.done)
-    activeTodoList$ = this.filter((todo) => !todo.done)
-    activeTodoTextList$ = this.activeTodoList$.map((todo$) => todo$.prop('text'))
-    completedTodoTextList$ = this.completedTodoList$.map((todo$) => todo$.prop('text'));
+    completedTodoList$ = this.use(
+        TodoListDomain,
+        this.state.filter((todo) => todo.done),
+    ) as TodoListDomain
+    activeTodoList$ = this.use(
+        TodoListDomain,
+        this.state.filter((todo) => !todo.done),
+    ) as TodoListDomain
+    activeTodoTextList$ = this.use(
+        Domain.Domain,
+        this.activeTodoList$.state.map((todo$) => todo$.prop('text')),
+    ) as Domain.Domain<string[]>
+    completedTodoTextList$ = this.use(
+        Domain.Domain,
+        this.completedTodoList$.state.map((todo$) => todo$.prop('text')),
+    ) as Domain.Domain<string[]>;
 
     @Domain.query()
     *getCompletedTodoList() {
@@ -182,9 +189,9 @@ export type TodoApp = {
 }
 
 export class TodoAppDomain extends Domain.Domain<TodoApp> {
-    todos$ = new TodoListDomain(this.prop('todos'))
-    filter$ = new TodoFilterDomain(this.prop('filter'))
-    input$ = new TextDomain(this.prop('input'));
+    todos$ = this.use(TodoListDomain, this.state.prop('todos')) as TodoListDomain
+    filter$ = this.use(TodoFilterDomain, this.state.prop('filter')) as TodoFilterDomain
+    input$ = this.use(TextDomain, this.state.prop('input')) as TextDomain;
 
     @Domain.command()
     *addTodo() {

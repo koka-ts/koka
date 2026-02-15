@@ -103,7 +103,9 @@ class ProductStorageDomain<Root extends RootState> extends Domain<Root['products
         const product = yield* this.getProduct(productId)
         const users = [] as UserEntity[]
         for (const collectorId of product.collectorIds) {
-            const user = yield* new UserStorageDomain(this.store.domain.prop('users')).getUser(collectorId)
+            const user = yield* this.store.domain
+                .use(UserStorageDomain, this.store.domain.state.prop('users'))
+                .getUser(collectorId)
             users.push(user)
         }
         return users
@@ -144,9 +146,9 @@ describe('Graph Domain Operations', () => {
         }
         store = new Store<RootState>({ state: initialState })
 
-        userStorage = new UserStorageDomain(store.domain.prop('users'))
-        orderStorage = new OrderStorageDomain(store.domain.prop('orders'))
-        productStorage = new ProductStorageDomain(store.domain.prop('products'))
+        userStorage = store.domain.use(UserStorageDomain, store.domain.state.prop('users'))
+        orderStorage = store.domain.use(OrderStorageDomain, store.domain.state.prop('orders'))
+        productStorage = store.domain.use(ProductStorageDomain, store.domain.state.prop('products'))
     })
 
     describe('User Operations', () => {

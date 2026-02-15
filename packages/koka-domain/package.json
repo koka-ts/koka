@@ -24,7 +24,6 @@
     },
     "dependencies": {
         "tslib": "^2.3.1",
-        "koka": "workspace:*",
         "koka-accessor": "workspace:*",
         "chalk": "^4.1.2"
     },

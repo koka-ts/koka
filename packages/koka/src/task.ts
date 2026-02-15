@@ -149,7 +149,7 @@ type LinkList<T> = {
     next: LinkList<T> | undefined
 }
 
-class LinkListManager<T> {
+class Queue<T> {
     private tail: LinkList<T> | undefined = undefined
     private head: LinkList<T> | undefined = undefined
 
@@ -269,7 +269,7 @@ export function* concurrent<
         },
     }
 
-    const jobManager = new LinkListManager<Generator<TaskYield, void>>()
+    const jobManager = new Queue<Generator<TaskYield, void>>()
 
     let asyncCount = 0
 
@@ -289,7 +289,7 @@ export function* concurrent<
         )
     }
 
-    const taskResultManager = new LinkListManager<TaskResult<TaskReturn>>()
+    const taskQueue = new Queue<TaskResult<TaskReturn>>()
 
     function* processTask(
         index: number,
@@ -310,14 +310,14 @@ export function* concurrent<
 
             result.done satisfies true
             activeTasksMap.delete(index)
-            taskResultManager.add({
+            taskQueue.add({
                 type: 'task-ok',
                 index,
                 value: result.value as TaskReturn,
             })
         } catch (error) {
             activeTasksMap.delete(index)
-            taskResultManager.add({
+            taskQueue.add({
                 type: 'task-err',
                 index,
                 error,
@@ -367,7 +367,7 @@ export function* concurrent<
                 continue
             }
 
-            let taskResult = taskResultManager.next()
+            let taskResult = taskQueue.next()
 
             while (taskResult) {
                 if (effect.type === 'task-wait-next') {
@@ -400,7 +400,7 @@ export function* concurrent<
                     continue mainLoop
                 }
 
-                taskResult = taskResultManager.next()
+                taskResult = taskQueue.next()
             }
 
             if (jobManager.isEmpty() && activeTasksMap.size === 0) {

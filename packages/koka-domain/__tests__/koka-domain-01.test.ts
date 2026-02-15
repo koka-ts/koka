@@ -36,8 +36,8 @@ class BoolDomain<Root> extends Domain<boolean, Root> {
 }
 
 class TodoDomain<Root> extends Domain<Todo, Root> {
-    text$ = new TextDomain(this.prop('text'))
-    done$ = new BoolDomain(this.prop('done'));
+    text$ = this.use(TextDomain, this.state.prop('text')) as TextDomain<Root>
+    done$ = this.use(BoolDomain, this.state.prop('done')) as BoolDomain<Root>;
 
     *updateTodoText(text: string) {
         const done = yield* get(this.done$)
@@ -65,25 +65,33 @@ class TodoListDomain<Root> extends Domain<Todo[], Root> {
         return 'todo added'
     }
 
-    todo(id: number) {
-        return new TodoDomain(this.find((todo) => todo.id === id))
+    todo(id: number): TodoDomain<Root> {
+        return this.use(TodoDomain, this.state.findId('id', id))
     }
 
-    getKey = (todo: Todo) => {
-        return todo.id
-    }
-
-    completedTodoList$ = this.filter((todo) => todo.done)
-    activeTodoList$ = this.filter((todo) => !todo.done)
-    activeTodoTextList$ = this.activeTodoList$.map((todo$) => todo$.prop('text'))
-    completedTodoTextList$ = this.completedTodoList$.map((todo$) => todo$.prop('text'))
+    completedTodoList$ = this.use(
+        TodoListDomain,
+        this.state.filter((todo) => todo.done),
+    ) as TodoListDomain<Root>
+    activeTodoList$ = this.use(
+        TodoListDomain,
+        this.state.filter((todo) => !todo.done),
+    ) as TodoListDomain<Root>
+    activeTodoTextList$ = this.use(
+        Domain,
+        this.activeTodoList$.state.map((todo$) => (todo$ as Accessor.Accessor<Todo, Todo>).prop('text')),
+    ) as Domain<string[], Root>
+    completedTodoTextList$ = this.use(
+        Domain,
+        this.completedTodoList$.state.map((todo$) => (todo$ as Accessor.Accessor<Todo, Todo>).prop('text')),
+    ) as Domain<string[], Root>
 }
 
 class TodoInputErr extends Err.Err('TodoInputErr')<string> {}
 
 class TodoAppDomain<Root> extends Domain<TodoApp, Root> {
-    todos$ = new TodoListDomain(this.prop('todos'))
-    input$ = new TextDomain(this.prop('input'));
+    todos$ = this.use(TodoListDomain, this.state.prop('todos'))
+    input$ = this.use(TextDomain, this.state.prop('input'));
 
     *addTodo() {
         const todoApp = yield* get(this)

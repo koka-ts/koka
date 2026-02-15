@@ -1,5 +1,6 @@
 import * as Async from 'koka/async'
 import * as Result from 'koka/result'
+import * as Accessor from 'koka-accessor'
 import {
     Domain,
     Store,
@@ -27,9 +28,11 @@ type Todo = {
     done: boolean
 }
 
+type TodoFilter = 'all' | 'done' | 'undone'
+
 type TodoApp = {
     todos: Todo[]
-    filter: 'all' | 'done' | 'undone'
+    filter: TodoFilter
     input: string
 }
 
@@ -57,8 +60,8 @@ class BoolDomain<Root> extends Domain<boolean, Root> {
 class RemoveTodoEvent extends Event('RemoveTodo')<{ todoId: number }> {}
 
 class TodoDomain<Root> extends Domain<Todo, Root> {
-    text$ = new TextDomain(this.prop('text'))
-    done$ = new BoolDomain(this.prop('done'));
+    text$ = this.use(TextDomain, this.state.prop('text')) as TextDomain<Root>
+    done$ = this.use(BoolDomain, this.state.prop('done')) as BoolDomain<Root>;
 
     @command()
     *updateTodoText(text: string) {
@@ -109,16 +112,18 @@ class TodoListDomain<Root> extends Domain<Todo[], Root> {
         return 'todo added'
     }
 
-    todo(id: number) {
-        return new TodoDomain(this.find((todo) => todo.id === id))
+    todo(id: number): TodoDomain<Root> {
+        return this.use(TodoDomain, this.state.findId('id', id))
     }
 
-    getKey = (todo: Todo) => {
-        return todo.id
-    }
-
-    completedTodoList$ = this.filter((todo) => todo.done)
-    completedTodoTextList$ = this.completedTodoList$.map((todo$) => todo$.prop('text'));
+    completedTodoList$ = this.use(
+        TodoListDomain,
+        this.state.filter((todo) => todo.done),
+    ) as TodoListDomain<Root>
+    completedTodoTextList$ = this.use(
+        Domain,
+        this.completedTodoList$.state.map((todo$) => todo$.prop('text')),
+    ) as Domain<string[], Root>;
 
     @query()
     *getCompletedTodoList() {
@@ -126,8 +131,14 @@ class TodoListDomain<Root> extends Domain<Todo[], Root> {
         return completedTodoList
     }
 
-    activeTodoList$ = this.filter((todo) => !todo.done)
-    activeTodoTextList$ = this.activeTodoList$.map((todo$) => todo$.prop('text'));
+    activeTodoList$ = this.use(
+        TodoListDomain,
+        this.state.filter((todo) => !todo.done),
+    ) as TodoListDomain<Root>
+    activeTodoTextList$ = this.use(
+        Domain,
+        this.activeTodoList$.state.map((todo$) => todo$.prop('text')),
+    ) as Domain<string[], Root>;
 
     @query()
     *getActiveTodoList() {
@@ -135,7 +146,7 @@ class TodoListDomain<Root> extends Domain<Todo[], Root> {
         return activeTodoList
     }
 
-    length$ = this.prop('length');
+    length$ = this.use(Domain, this.state.prop('length')) as Domain<number, Root>;
 
     @query()
     *getTodoCount() {
@@ -145,9 +156,9 @@ class TodoListDomain<Root> extends Domain<Todo[], Root> {
 }
 
 class TodoAppDomain<Root> extends Domain<TodoApp, Root> {
-    todos$ = new TodoListDomain(this.prop('todos'))
-    input$ = new TextDomain(this.prop('input'))
-    filter$ = this.prop('filter');
+    todos$ = this.use(TodoListDomain, this.state.prop('todos')) as TodoListDomain<Root>
+    input$ = this.use(TextDomain, this.state.prop('input')) as TextDomain<Root>
+    filter$ = this.use(Domain, this.state.prop('filter')) as Domain<TodoFilter, Root>;
 
     @command()
     *addTodo() {
@@ -172,16 +183,24 @@ class TodoAppDomain<Root> extends Domain<TodoApp, Root> {
         if (filter === 'all') {
             return todos
         } else if (filter === 'done') {
-            return todos.filter((todo) => todo.done)
+            return todos.filter((todo: Todo) => todo.done)
         } else {
-            return todos.filter((todo) => !todo.done)
+            return todos.filter((todo: Todo) => !todo.done)
         }
     }
 
     @query()
     *getTodoSummary() {
-        const activeTodoCount = yield* get(this.todos$.activeTodoList$.prop('length'))
-        const completedTodoCount = yield* get(this.todos$.completedTodoList$.prop('length'))
+        const activeTodoLengthDomain = this.todos$.use(
+            Domain,
+            this.todos$.activeTodoList$.state.prop('length'),
+        ) as Domain<number, Root>
+        const completedLengthDomain = this.todos$.use(
+            Domain,
+            this.todos$.completedTodoList$.state.prop('length'),
+        ) as Domain<number, Root>
+        const activeTodoCount = yield* get(activeTodoLengthDomain)
+        const completedTodoCount = yield* get(completedLengthDomain)
         const filter = yield* get(this.filter$)
         return {
             activeTodoCount,
@@ -192,7 +211,7 @@ class TodoAppDomain<Root> extends Domain<TodoApp, Root> {
 
     @query()
     *errorQuery() {
-        yield* get(this.todos$.index(-1))
+        yield* get(this.todos$.use(Domain, this.todos$.state.index(-1)))
     }
 }
 
@@ -200,7 +219,12 @@ class TodoAppDomain<Root> extends Domain<TodoApp, Root> {
 class ErrorQueryDomain extends Domain<TodoApp, TodoApp> {
     @query()
     *errorQuery() {
-        const result = yield* get(this.prop('filter').match((state) => state === 'done'))
+        const result = yield* get(
+            this.use(
+                Domain,
+                this.state.prop('filter').refine((state: TodoFilter) => state === 'done'),
+            ),
+        )
         return result
     }
 }
@@ -419,7 +443,7 @@ describe('Store', () => {
 
     it('should subscribe to state changes', async () => {
         const listener = jest.fn()
-        const unsubscribe = store.subscribe(listener)
+        const unsubscribe = store.subscribeState(listener)
 
         const newState = { ...store.getState(), input: 'test' }
         store.setState(newState)
@@ -432,7 +456,7 @@ describe('Store', () => {
 
     it('should unsubscribe from state changes', async () => {
         const listener = jest.fn()
-        const unsubscribe = store.subscribe(listener)
+        const unsubscribe = store.subscribeState(listener)
 
         unsubscribe()
 
@@ -446,7 +470,7 @@ describe('Store', () => {
 
     it('should destroy store and clear listeners', async () => {
         const listener = jest.fn()
-        store.subscribe(listener)
+        store.subscribeState(listener)
 
         store.destroy()
 
@@ -537,10 +561,13 @@ describe('Domain', () => {
     })
 
     it('should transform domain', () => {
-        const transformed = domain.transform({
-            get: (state: TodoApp) => state.todos,
-            set: (todos: Todo[], state: TodoApp) => ({ ...state, todos }),
-        })
+        const transformed = domain.use(
+            Domain,
+            domain.state.transform({
+                get: (state: TodoApp) => Accessor.ok(state.todos),
+                set: (todos: Todo[], state: TodoApp) => Accessor.ok({ ...state, todos }),
+            }),
+        )
         expect(transformed).toBeInstanceOf(Domain)
 
         const result = getState(transformed)
@@ -554,7 +581,7 @@ describe('Domain', () => {
     })
 
     it('should access property', () => {
-        const inputDomain = domain.prop('input')
+        const inputDomain = domain.use(Domain, domain.state.prop('input')) as Domain<string, TodoApp>
         expect(inputDomain).toBeInstanceOf(Domain)
 
         const result = getState(inputDomain)
@@ -562,8 +589,8 @@ describe('Domain', () => {
     })
 
     it('should access array index', () => {
-        const todosDomain = domain.prop('todos')
-        const firstTodoDomain = todosDomain.index(0)
+        const todosDomain = domain.use(Domain, domain.state.prop('todos')) as Domain<Todo[], TodoApp>
+        const firstTodoDomain = todosDomain.use(Domain, todosDomain.state.index(0)) as Domain<Todo, TodoApp>
         expect(firstTodoDomain).toBeInstanceOf(Domain)
 
         const result = getState(firstTodoDomain)
@@ -571,8 +598,8 @@ describe('Domain', () => {
     })
 
     it('should find array item', () => {
-        const todosDomain = domain.prop('todos')
-        const todoDomain = todosDomain.find((todo) => todo.id === 1)
+        const todosDomain = domain.use(Domain, domain.state.prop('todos')) as Domain<Todo[], TodoApp>
+        const todoDomain = todosDomain.use(TodoDomain, todosDomain.state.findId('id', 1)) as TodoDomain<TodoApp>
         expect(todoDomain).toBeInstanceOf(Domain)
 
         const result = getState(todoDomain)
@@ -580,13 +607,25 @@ describe('Domain', () => {
     })
 
     it('should match state', () => {
-        const matchedDomain = domain.prop('filter').match((state): state is 'all' => state === 'all')
+        const matchedDomain = domain.use(
+            Domain,
+            domain.state
+                .prop('filter')
+                .refine((s) => s === 'all')
+                .as<'all'>(),
+        ) as Domain<'all', TodoApp>
         expect(matchedDomain).toBeInstanceOf(Domain)
 
         const result = getState(matchedDomain)
         expect(result).toEqual(Result.ok('all'))
 
-        const unmatchedDomain = domain.prop('filter').match((state): state is 'done' => state === 'done')
+        const unmatchedDomain = domain.use(
+            Domain,
+            domain.state
+                .prop('filter')
+                .refine((s) => s === 'done')
+                .as<'done'>(),
+        ) as Domain<'done', TodoApp>
         expect(unmatchedDomain).toBeInstanceOf(Domain)
 
         const unmatchedResult = getState(unmatchedDomain)
@@ -594,13 +633,19 @@ describe('Domain', () => {
     })
 
     it('should refine state', () => {
-        const refinedDomain = domain.refine((state) => state.todos.length > 0)
+        const refinedDomain = domain.use(
+            Domain,
+            domain.state.refine((state) => state.todos.length > 0),
+        ) as Domain<TodoApp, TodoApp>
         expect(refinedDomain).toBeInstanceOf(Domain)
 
         const result = getState(refinedDomain)
         expect(result).toEqual(Result.ok(store.getState()))
 
-        const failedRefinedDomain = domain.refine((state) => state.todos.length === 0)
+        const failedRefinedDomain = domain.use(
+            Domain,
+            domain.state.refine((state) => state.todos.length === 0),
+        ) as Domain<TodoApp, TodoApp>
         expect(failedRefinedDomain).toBeInstanceOf(Domain)
 
         const failedResult = getState(failedRefinedDomain)
@@ -608,8 +653,11 @@ describe('Domain', () => {
     })
 
     it('should map array', () => {
-        const todosDomain = domain.prop('todos')
-        const mappedDomain = todosDomain.map((todo$) => todo$.prop('text'))
+        const todosDomain = domain.use(Domain, domain.state.prop('todos')) as Domain<Todo[], TodoApp>
+        const mappedDomain = todosDomain.use(
+            Domain,
+            todosDomain.state.map((todo$) => todo$.prop('text')),
+        ) as Domain<string[], TodoApp>
         expect(mappedDomain).toBeInstanceOf(Domain)
 
         const result = getState(mappedDomain)
@@ -617,8 +665,11 @@ describe('Domain', () => {
     })
 
     it('should filter array', () => {
-        const todosDomain = domain.prop('todos')
-        const filteredDomain = todosDomain.filter((todo) => todo.done)
+        const todosDomain = domain.use(Domain, domain.state.prop('todos')) as Domain<Todo[], TodoApp>
+        const filteredDomain = todosDomain.use(
+            Domain,
+            todosDomain.state.filter((todo: Todo) => todo.done),
+        ) as Domain<Todo[], TodoApp>
         expect(filteredDomain).toBeInstanceOf(Domain)
 
         const result = getState(filteredDomain)
@@ -627,7 +678,10 @@ describe('Domain', () => {
     })
 
     it('should select with proxy', () => {
-        const selectedDomain = domain.select((proxy) => proxy.filter)
+        const selectedDomain = domain.use(
+            Domain,
+            domain.state.select((proxy: Accessor.AccessorProxy<TodoApp>) => proxy.filter),
+        ) as Domain<TodoFilter, TodoApp>
         expect(selectedDomain).toBeInstanceOf(Domain)
 
         const result = getState(selectedDomain)
@@ -977,13 +1031,13 @@ describe('Subscription mechanisms', () => {
         const listener = jest.fn()
         const unsubscribe = subscribeQueryResult(errorDomain.errorQuery, listener)
 
-        setState(errorDomain.prop('filter'), 'undone')
+        setState(errorDomain.use(Domain, errorDomain.state.prop('filter')), 'undone')
 
         await store.promise
 
         expect(listener).toHaveBeenCalledTimes(0)
 
-        setState(errorDomain.prop('filter'), 'done')
+        setState(errorDomain.use(Domain, errorDomain.state.prop('filter')), 'done')
 
         await store.promise
 
