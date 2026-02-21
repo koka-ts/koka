@@ -1,6 +1,5 @@
 import { useSyncExternalStore } from 'react'
 import * as Domain from 'koka-domain'
-import * as Err from 'koka/err'
 import * as Result from 'koka/result'
 import * as Accessor from 'koka-accessor'
 
@@ -30,26 +29,20 @@ export function useDomainState<State, Root>(domain: Domain.Domain<State, Root>):
     return result.value
 }
 
-export function useDomainQueryResult<Return, Yield extends Err.AnyErr = Err.AnyErr>(
-    query: Domain.Query<Return, Yield>,
-): Result.Result<Return, Yield> {
+export function useDomainQueryResult<Return = unknown>(queryRun: Domain.QueryRun<Return>): Domain.Result<Return> {
     const subscribe = (onStoreChange: () => void) => {
-        return Domain.subscribeQueryResult(query, onStoreChange)
+        return Domain.subscribeQueryResult<Return>(queryRun, () => onStoreChange())
     }
 
     const getState = () => {
-        return Domain.getQueryResult(query)
+        return Domain.getQueryResult<Return>(queryRun)
     }
 
-    const result = useSyncExternalStore(subscribe, getState, getState)
-
-    return result
+    return useSyncExternalStore(subscribe, getState, getState) as Domain.Result<Return>
 }
 
-export function useDomainQuery<Return, Yield extends Err.AnyErr = Err.AnyErr>(
-    query: Domain.Query<Return, Yield>,
-): Return {
-    const result = useDomainQueryResult(query)
+export function useDomainQuery<Return = unknown>(queryRun: Domain.QueryRun<Return>): Return {
+    const result = useDomainQueryResult<Return>(queryRun)
 
     if (result.type === 'err') {
         throw result.error

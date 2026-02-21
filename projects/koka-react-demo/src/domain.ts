@@ -1,241 +1,292 @@
-import * as Domain from 'koka-domain'
-import * as Async from 'koka/async'
+import {
+    Domain,
+    set,
+    get,
+    emit,
+    Event,
+    event,
+    query,
+    command,
+    effect,
+    waitFor,
+    all,
+    type EffectContext,
+} from 'koka-domain'
 import * as Err from 'koka/err'
 
-export class TextDomain extends Domain.Domain<string> {
-    @Domain.command()
+export class TextDomain<Root = any> extends Domain<string, Root> {
+    @command()
     *updateText(text: string) {
-        yield* Domain.set(this, text)
+        yield* set(this, text)
         return 'text updated'
     }
-    @Domain.command()
+
+    @command()
     *clearText() {
-        yield* Domain.set(this, '')
+        yield* set(this, '')
         return 'text cleared'
     }
 }
 
-export class BoolDomain extends Domain.Domain<boolean> {
-    @Domain.command()
+export class BoolDomain<Root = any> extends Domain<boolean, Root> {
+    @command()
     *toggle() {
-        yield* Domain.set(this, (value) => !value)
+        yield* set(this, (v: boolean) => !v)
         return 'bool toggled'
     }
 }
 
-// Event definition - only for operations that sub-domain cannot handle itself
-export class RemoveTodoEvent extends Domain.Event('RemoveTodo')<{ todoId: number }> {}
+/** Emitted by TodoDomain when animation ends; TodoListDomain performs actual remove. */
+export class RemoveTodoEvent extends Event('RemoveTodo')<{ todoId: number }> {}
+
+// ---------------------------------------------------------------------------
+// Animation: reusable single-animation state (key inside state), start/end events
+// ---------------------------------------------------------------------------
+
+export type AnimationKind = 'enter' | 'exit'
+
+export type AnimationState = {
+    kind: AnimationKind
+    startedAt: number
+    durationMs: number
+    progress: number
+}
+
+export function rafThenDelay(): Promise<void> {
+    return new Promise((resolve) => {
+        requestAnimationFrame(() => {
+            resolve()
+        })
+    })
+}
+
+/**
+ * Reusable animation domain: single AnimationState | undefined per instance.
+ * animate(initialState) sets state and runs a while-true loop with waitFor(rafThenDelay),
+ * advancing progress each frame until progress >= 1, then clears state and returns.
+ */
+export class AnimationDomain<Root = any> extends Domain<AnimationState | undefined, Root> {
+    @command()
+    *animate(initialState: AnimationState) {
+        yield* set(this, initialState)
+        while (true) {
+            yield* waitFor(rafThenDelay())
+            const anim = yield* get(this)
+            if (anim == undefined) {
+                return
+            }
+            const progress = Math.min(1, (Date.now() - anim.startedAt) / anim.durationMs)
+            if (progress >= 1) {
+                yield* set(this, undefined)
+                return
+            }
+            yield* set(this, { ...anim, progress })
+        }
+    }
+}
+
+export const REMOVE_ANIMATION_MS = 3200
+
+// ---------------------------------------------------------------------------
+// Todo: extends with optional animation state
+// ---------------------------------------------------------------------------
 
 export type Todo = {
     id: number
     text: string
     done: boolean
+    animation?: AnimationState
 }
 
-export class TodoDomain extends Domain.Domain<Todo> {
-    text$ = this.use(TextDomain, this.state.prop('text')) as TextDomain
-    done$ = this.use(BoolDomain, this.state.prop('done')) as BoolDomain;
+export class TodoDomain<Root = any> extends Domain<Todo, Root> {
+    text = this.select('text').use(TextDomain)
+    done = this.select('done').use(BoolDomain)
+    animation = this.select('animation').use(AnimationDomain);
 
-    @Domain.command()
+    @command()
     *updateTodoText(text: string) {
-        // Can be handled within the domain, no event needed
-        yield* this.text$.updateText(text)
+        yield* set(this.text, text)
         return 'todo updated'
     }
 
-    @Domain.command()
+    @command()
     *toggleTodo() {
-        // Can be handled within the domain, no event needed
-        yield* this.done$.toggle()
+        yield* set(this.done, (v: boolean) => !v)
         return 'todo toggled'
     }
 
-    @Domain.command()
+    @command()
     *removeTodo() {
-        // Cannot remove itself from the list, needs to emit event to parent domain
-        const todo = yield* Domain.get(this)
-        yield* Domain.emit(this, new RemoveTodoEvent({ todoId: todo.id }))
-        return 'todo remove requested'
+        const todo = yield* get(this)
+        yield* this.animation.animate({
+            kind: 'exit',
+            startedAt: Date.now(),
+            durationMs: REMOVE_ANIMATION_MS,
+            progress: 0,
+        })
+        yield* emit(new RemoveTodoEvent({ todoId: todo.id }))
+        return 'todo removed'
     }
 }
 
-let todoUid = 100
+let todoUid = 6000
 
-export class TodoListDomain extends Domain.Domain<Todo[]> {
-    @Domain.command()
+export class TodoListDomain<Root = any> extends Domain<Todo[], Root> {
+    @command()
     *addTodo(text: string) {
-        const newTodo = {
-            id: todoUid++,
-            text,
-            done: false,
-        }
-        yield* Domain.set(this, (todos) => [...todos, newTodo])
-
+        const newTodo: Todo = { id: todoUid++, text, done: false }
+        yield* set(this, (todos: Todo[]) => [...todos, newTodo])
         return 'todo added'
     }
 
-    @Domain.command()
+    @event(RemoveTodoEvent)
+    *handleRemoveTodo(payload: { todoId: number }) {
+        yield* set(this, (todos: Todo[]) => todos.filter((t) => t.id !== payload.todoId))
+    }
+
+    @command()
     *toggleAll() {
-        const todos = yield* Domain.get(this)
+        const todos = yield* get(this)
         const allDone = todos.every((todo) => todo.done)
-
-        // Can be handled directly within this domain
-        yield* Domain.set(this, (todos) => {
-            return todos.map((todo) => ({ ...todo, done: !allDone }))
-        })
-
+        yield* set(this, (todos: Todo[]) => todos.map((todo) => ({ ...todo, done: !allDone })))
         return 'all todos toggled'
     }
 
-    @Domain.command()
+    @command()
     *clearCompleted() {
-        // Can be handled directly within this domain
-        yield* Domain.set(this, (todos) => todos.filter((todo) => !todo.done))
+        const todos = yield* get(this)
+        const completed = todos.filter((t) => t.done)
+        if (completed.length === 0) return 'completed todos cleared'
+        yield* all(completed.map((t) => this.todo(t.id).removeTodo()))
         return 'completed todos cleared'
     }
 
-    @Domain.command()
+    @command()
     *removeTodo(id: number) {
-        yield* Domain.set(this, (todos) => todos.filter((todo) => todo.id !== id))
+        yield* set(this, (todos: Todo[]) => todos.filter((todo) => todo.id !== id))
         return 'todo removed'
     }
 
-    // Event handler - only handle events from sub-domains that cannot be handled locally
-    @Domain.event(RemoveTodoEvent)
-    *handleRemoveTodo(event: RemoveTodoEvent) {
-        yield* this.removeTodo(event.payload.todoId)
+    todo(id: number): TodoDomain<Root> {
+        return this.find('id', id).use(TodoDomain)
     }
 
-    todo(id: number): TodoDomain {
-        return this.use(TodoDomain, this.state.findId('id', id))
-    }
-
-    completedTodoList$ = this.use(
-        TodoListDomain,
-        this.state.filter((todo) => todo.done),
-    ) as TodoListDomain
-    activeTodoList$ = this.use(
-        TodoListDomain,
-        this.state.filter((todo) => !todo.done),
-    ) as TodoListDomain
-    activeTodoTextList$ = this.use(
-        Domain.Domain,
-        this.activeTodoList$.state.map((todo$) => todo$.prop('text')),
-    ) as Domain.Domain<string[]>
-    completedTodoTextList$ = this.use(
-        Domain.Domain,
-        this.completedTodoList$.state.map((todo$) => todo$.prop('text')),
-    ) as Domain.Domain<string[]>;
-
-    @Domain.query()
+    @query()
     *getCompletedTodoList() {
-        const completedTodoList = yield* Domain.get(this.completedTodoList$)
-        return completedTodoList
+        const list = yield* get(this)
+        return list.filter((t) => t.done)
     }
 
-    @Domain.query()
+    @query()
     *getActiveTodoList() {
-        const activeTodoList = yield* Domain.get(this.activeTodoList$)
-        return activeTodoList
+        const list = yield* get(this)
+        return list.filter((t) => !t.done)
     }
 
-    @Domain.query()
-    *getActiveTodoTextList() {
-        const activeTodoTextList = yield* Domain.get(this.activeTodoTextList$)
-        return activeTodoTextList
-    }
-
-    @Domain.query()
-    *getCompletedTodoTextList() {
-        const completedTodoTextList = yield* Domain.get(this.completedTodoTextList$)
-        return completedTodoTextList
-    }
-
-    @Domain.query()
+    @query()
     *getTodoCount() {
-        const todoList = yield* Domain.get(this)
-        return todoList.length
+        const list = yield* get(this)
+        return list.length
     }
 
-    @Domain.query()
+    @query()
     *getCompletedTodoCount() {
-        const completedTodoList = yield* Domain.get(this.completedTodoList$)
-        return completedTodoList.length
+        const list = yield* get(this)
+        return list.filter((t) => t.done).length
     }
 
-    @Domain.query()
+    @query()
     *getActiveTodoCount() {
-        const activeTodoList = yield* Domain.get(this.activeTodoList$)
-        return activeTodoList.length
+        const list = yield* get(this)
+        return list.filter((t) => !t.done).length
+    }
+
+    @query()
+    *getTodoDoneList() {
+        const list = yield* get(this)
+        return list.map((t) => t.done)
     }
 }
 
 export type TodoFilter = 'all' | 'done' | 'undone'
 
-export class TodoFilterDomain extends Domain.Domain<TodoFilter> {
-    @Domain.command()
+export class TodoFilterDomain<Root = any> extends Domain<TodoFilter, Root> {
+    @command()
     *setFilter(filter: TodoFilter) {
-        yield* Domain.set(this, filter)
+        yield* set(this, filter)
         return 'filter set'
     }
 }
 
 export class TodoInputErr extends Err.Err('TodoInputErr')<string> {}
 
+/** Domain for a single number (e.g. last-saved timestamp). */
+class LastSavedAtDomain<Root = any> extends Domain<number | null, Root> {}
+
 export type TodoApp = {
     todos: Todo[]
     filter: TodoFilter
     input: string
+    lastSavedAt: number | null
 }
 
-export class TodoAppDomain extends Domain.Domain<TodoApp> {
-    todos$ = this.use(TodoListDomain, this.state.prop('todos')) as TodoListDomain
-    filter$ = this.use(TodoFilterDomain, this.state.prop('filter')) as TodoFilterDomain
-    input$ = this.use(TextDomain, this.state.prop('input')) as TextDomain;
+export const TODOS_STORAGE_KEY = 'koka-demo-todos'
 
-    @Domain.command()
+export class TodoAppDomain<Root = any> extends Domain<TodoApp, Root> {
+    todos = this.select('todos').use(TodoListDomain)
+    todoFilter = this.select('filter').use(TodoFilterDomain)
+    input = this.select('input').use(TextDomain)
+    lastSavedAt = this.select('lastSavedAt').use(LastSavedAtDomain)
+
+    /**
+     * Optional storage key for persisting this instance's todos to localStorage.
+     * Set by the composition layer (e.g. main.tsx) so save/load use the same key.
+     * Do not derive from domain path — upstream path is unpredictable with domain composition.
+     */
+    storageKey?: string
+
+    /** Filtered todos domain by filter type (uses deriving .filter). */
+    todosByFilter(filterType: TodoFilter): Domain<Todo[], Root> {
+        const list = this.select('todos')
+        if (filterType === 'all') return list
+        if (filterType === 'done') return list.filter('done', true)
+        return list.filter('done', false)
+    }
+
+    /** Persist todos to localStorage when the list changes. Only runs when storageKey is set by the composition layer. Do not set domain state here or effect re-run can cause an infinite loop. */
+    @effect()
+    *syncTodosToStorage(_ctx: EffectContext) {
+        if (this.storageKey == null) return
+        const todos = yield* get(this.todos)
+        localStorage.setItem(this.storageKey, JSON.stringify(todos))
+    }
+
+    @command()
     *addTodo() {
-        const todoApp = yield* Domain.get(this)
-
+        const todoApp = yield* get(this)
         if (todoApp.input === '') {
-            throw yield* Err.throw(new TodoInputErr('Input is empty'))
+            throw new TodoInputErr('Input is empty')
         }
-
-        yield* this.todos$.addTodo(todoApp.input)
-        yield* this.input$.clearText()
+        yield* this.todos.addTodo(todoApp.input)
+        yield* set(this.input, '')
         return 'Todo added'
     }
 
-    @Domain.command()
+    @command()
     *updateInput(input: string) {
-        yield* Async.await(Promise.resolve('test async'))
-        yield* this.input$.updateText(input)
+        yield* set(this.input, input)
         return 'Input updated'
     }
 
-    @Domain.query()
+    @query()
     *getFilteredTodoList() {
-        const todoList = yield* Domain.get(this.todos$)
-        const filter = yield* Domain.get(this.filter$)
-
-        if (filter === 'all') {
-            return todoList
-        }
-
-        if (filter === 'done') {
-            return todoList.filter((todo) => todo.done)
-        }
-
-        if (filter === 'undone') {
-            return todoList.filter((todo) => !todo.done)
-        }
-
-        return todoList
+        const filter = yield* get(this.todoFilter)
+        return yield* get(this.todosByFilter(filter))
     }
 
-    @Domain.query()
+    @query()
     *getFilteredTodoIds() {
-        const todoList = yield* this.getFilteredTodoList()
-        return todoList.map((todo) => todo.id)
+        const filter = yield* get(this.todoFilter)
+        return yield* get(this.todosByFilter(filter).map('id'))
     }
 }

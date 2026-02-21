@@ -1,7 +1,14 @@
 import * as Accessor from 'koka-accessor'
 import { shallowEqual } from './shallowEqual'
 
+// ---------------------------------------------------------------------------
+// Re-export shallowEqual
+// ---------------------------------------------------------------------------
 export { shallowEqual }
+
+// ---------------------------------------------------------------------------
+// Serializable & Result
+// ---------------------------------------------------------------------------
 
 export type SerializablePrimitives = void | undefined | number | string | boolean | null
 
@@ -20,32 +27,9 @@ export type ToType<T> = T extends object | unknown[]
 
 export type Result<T> = Accessor.AccessorResult<T>
 
-export function shallowEqualResult<T>(a: Result<T>, b: Result<T>): boolean {
-    if (a === b) {
-        return true
-    }
-
-    if (a.type === 'ok' && b.type === 'ok') {
-        return shallowEqual(a.value, b.value)
-    }
-
-    if (a.type === 'err' && b.type === 'err') {
-        return shallowEqual(a.error, b.error)
-    }
-
-    return false
-}
-
-export type StorePlugin<Root, S extends Store<Root> = Store<Root>> = (store: S) => (() => void) | void
-
-export type StoreOptions<Root> = {
-    state: Root
-    plugins?: StorePlugin<Root, Store<Root>>[]
-}
-
-export type AnyStore = Store<any>
-
-export type InferStoreState<S> = S extends Store<infer State> ? State : never
+// ---------------------------------------------------------------------------
+// Domain path (structural description of domain tree)
+// ---------------------------------------------------------------------------
 
 export type DomainSelectPath = {
     type: 'select'
@@ -64,6 +48,19 @@ export type DomainFindPath = {
     type: 'find'
     key: string
     value: SerializablePrimitives
+    prev: DomainPath
+}
+
+export type DomainFilterPath = {
+    type: 'filter'
+    key: string
+    value: SerializablePrimitives
+    prev: DomainPath
+}
+
+export type DomainMapPath = {
+    type: 'map'
+    key: string
     prev: DomainPath
 }
 
@@ -94,35 +91,255 @@ export type DomainPath =
     | DomainSelectPath
     | DomainMatchPath
     | DomainFindPath
+    | DomainFilterPath
+    | DomainMapPath
 
-export type InferDomainState<S> = S extends Domain<infer StateType, any> ? StateType : never
-export type InferDomainRoot<S> = S extends Domain<any, infer Root> ? Root : never
+// ---------------------------------------------------------------------------
+// SetStateInput
+// ---------------------------------------------------------------------------
+
+export type SetStateInput<S> = S | Accessor.Updater<S> | ((state: S) => S)
+
+// ---------------------------------------------------------------------------
+// Event types
+// ---------------------------------------------------------------------------
+
+export type EventRequest = GenGetRequest | GenGetResultRequest | GenSetRequest | GenEmitRequest
+
+export interface Event<Name extends string, T> {
+    type: 'event'
+    name: Name
+    payload: T
+}
+
+export type AnyEvent = Event<string, any>
+
+type EventCtor<Name extends string, T> = new (...args: any[]) => Event<Name, T>
+
+export type AnyEventCtor = EventCtor<string, any>
+
+export type EventValue<E extends AnyEvent> = E['payload']
+
+/** Event handler: generator method taking event payload, yielding GenRequest. */
+export type EventHandler<E extends AnyEventCtor> = (
+    event: EventValue<InstanceType<E>>,
+) => Generator<EventRequest, void, unknown>
+
+// ---------------------------------------------------------------------------
+// Store options (interface to break circular ref; Store class defined later)
+// ---------------------------------------------------------------------------
+
+export interface IStore<Root> {
+    getState(): Root
+    state: Root
+}
+
+export type StorePlugin<Root, S extends IStore<Root> = IStore<Root>> = (store: S) => (() => void) | void
+
+export type StoreOptions<Root> = {
+    state: Root
+    plugins?: StorePlugin<Root, IStore<Root>>[]
+}
+
+// InferStoreState, InferDomainState, InferDomainRoot, ObjectShape, StoreCtor exported after Store/Domain
+
+// ---------------------------------------------------------------------------
+// Decorator context (for @query, @command, @event, @effect)
+// ---------------------------------------------------------------------------
+
+export type KokaClassMethodDecoratorContext<
+    This = unknown,
+    Value extends (this: This, ...args: any) => any = (this: This, ...args: any) => any,
+> = ClassMethodDecoratorContext<This, Value> & {
+    name: string
+    static: false
+}
+
+// ---------------------------------------------------------------------------
+// getKeyFromPath / getDomainCtorKey / getDomainCacheKey (before Domain)
+// ---------------------------------------------------------------------------
+
+const getKeyFromPathCache = new WeakMap<DomainPath, string>()
+
+export function getKeyFromPath(path: DomainPath): string {
+    const cached = getKeyFromPathCache.get(path)
+    if (cached) {
+        return cached
+    }
+    let result: string
+    if (path.type === 'root') {
+        result = 'root'
+    } else if (path.type === 'select') {
+        result = getKeyFromPath(path.prev) + '.' + path.key
+    } else if (path.type === 'match') {
+        result = getKeyFromPath(path.prev) + '.' + `match(${path.key}=${path.value})`
+    } else if (path.type === 'find') {
+        result = getKeyFromPath(path.prev) + '.' + `find(${path.key}=${path.value})`
+    } else if (path.type === 'filter') {
+        result = getKeyFromPath(path.prev) + '.' + `filter(${path.key}=${path.value})`
+    } else if (path.type === 'map') {
+        result = getKeyFromPath(path.prev) + '.' + `map(${path.key})`
+    } else if (path.type === 'object') {
+        result = `object(${Object.entries(path.shape)
+            .map(([pathKey, subPath]) => `${pathKey}:${getKeyFromPath(subPath)}`)
+            .join(', ')})`
+    } else if (path.type === 'union') {
+        result = `union(${path.variants.map((variant) => getKeyFromPath(variant)).join(' | ')})`
+    } else if (path.type === 'optional') {
+        result = `optional(${getKeyFromPath(path.inner)})`
+    } else {
+        path satisfies never
+        throw new Error('[koka-domain] getKeyFromPath: invalid path type')
+    }
+    getKeyFromPathCache.set(path, result)
+    return result
+}
+
+const domainCtorIdMap = new WeakMap<object, number>()
+let domainCtorUid = 0
+
+export function getDomainCtorKey(DomainCtor: new (...args: any[]) => any): string {
+    let id = domainCtorIdMap.get(DomainCtor)
+    if (id === undefined) {
+        id = domainCtorUid++
+        domainCtorIdMap.set(DomainCtor, id)
+    }
+    return `${(DomainCtor as Function).name ?? 'Anonymous'}:${id}`
+}
+
+export function getDomainCacheKey(Ctor: new (...args: any[]) => any, path: DomainPath): string {
+    return getDomainCtorKey(Ctor) + ':' + getKeyFromPath(path)
+}
+
+// ---------------------------------------------------------------------------
+// Domain class & related types
+// ---------------------------------------------------------------------------
+
+/** Single parent (derived) or multiple parents (composited). Root has no parent. */
+export type ParentDomains<Root> = Domain<any, Root> | Set<Domain<any, Root>>
+
+export type AnyDomain = Domain<any, any>
+
+export type DomainCtor<StateType, Root, This extends Domain<StateType, Root> = Domain<StateType, Root>> = new (
+    store: Store<Root>,
+    accessor: Accessor.Accessor<StateType, Root>,
+    path: DomainPath,
+    parentDomain?: ParentDomains<Root>,
+) => This
+
+export type AnyDomainCtor = DomainCtor<any, any>
+
+// ---------------------------------------------------------------------------
+// Generator request shapes (depend on AnyDomain)
+// ---------------------------------------------------------------------------
+
+export type GenGetRequest = { type: 'get'; domain: AnyDomain }
+export type GenGetResultRequest = { type: 'getResult'; domain: AnyDomain }
+export type GenSetRequest = { type: 'set'; domain: AnyDomain; setStateInput: SetStateInput<unknown> }
+export type GenEmitRequest = { type: 'emit'; event: AnyEvent }
+/** Only valid inside @effect; suspends until promise resolves (gen.next(value)) or rejects (gen.throw(reason)). */
+export type GenWaitRequest = { type: 'wait'; promise: Promise<unknown> }
+
+/** Run multiple generators in parallel; wait requests are collected and Promise.all'd each frame. */
+export type GenAllRequest = { type: 'all'; generators: Generator<GenRequest, unknown, unknown>[] }
+
+export type GenRequest =
+    | GenGetRequest
+    | GenGetResultRequest
+    | GenSetRequest
+    | GenEmitRequest
+    | GenWaitRequest
+    | GenAllRequest
+
+export type QueryRequest = GenGetRequest | GenGetResultRequest
+
+export type CommandRequest =
+    | GenGetRequest
+    | GenGetResultRequest
+    | GenSetRequest
+    | GenEmitRequest
+    | GenWaitRequest
+    | GenAllRequest
+
+export type EffectRequest =
+    | GenGetRequest
+    | GenGetResultRequest
+    | GenSetRequest
+    | GenEmitRequest
+    | GenWaitRequest
+    | GenAllRequest
+
+export type Query<Args extends Serializable[], Return> = ((
+    ...args: Args
+) => Generator<QueryRequest, Return, unknown>) & {
+    domain: AnyDomain
+    methodName: string
+}
+
+export type AnyQuery = Query<any, any>
+
+export type QueryRun<Return = unknown> = Generator<QueryRequest, Return, unknown>
+
+export type AnyQueryRun = QueryRun<any>
+
+export type Command<Args extends Serializable[], Return> = ((
+    ...args: Args
+) => Generator<CommandRequest, Return, unknown>) & {
+    domain: AnyDomain
+    methodName: string
+}
+
+export type AnyCommand = Command<any, any>
+
+export type EffectContext = {
+    abortSignal: AbortSignal
+    abortController: AbortController
+}
+
+/** Effect 方法签名：由 @effect 装饰的方法 */
+export type EffectMethod<
+    This,
+    Args extends [] | [ctx: EffectContext],
+    Request extends EffectRequest = EffectRequest,
+> = {
+    (this: This, ...args: Args): Generator<Request, void, unknown>
+}
+
+export type AnyEffectMethod = EffectMethod<any, any, any>
 
 export class Domain<StateType, Root> {
     readonly store: Store<Root>
     readonly accessor: Accessor.Accessor<StateType, Root>
     readonly path: DomainPath
     readonly key: string
-    constructor(store: Store<Root>, accessor: Accessor.Accessor<StateType, Root>, path: DomainPath) {
+    readonly parentDomain?: ParentDomains<Root>
+
+    constructor(
+        store: Store<Root>,
+        accessor: Accessor.Accessor<StateType, Root>,
+        path: DomainPath,
+        parentDomain?: ParentDomains<Root>,
+    ) {
         this.store = store
         this.accessor = accessor
         this.path = path
+        this.parentDomain = parentDomain
         this.key = getDomainCacheKey(this.constructor as typeof Domain<StateType, Root>, this.path)
     }
 
     private localDomainCache = new Map<string, Domain<any, Root>>()
 
-    getDomainFromCache<StateType>(
-        Ctor: typeof Domain<any, Root>,
-        path: DomainPath,
-    ): Domain<StateType, Root> | undefined {
-        const domain = this.store.getDomainFromCache(Ctor, path) as Domain<StateType, Root> | undefined
-
-        return domain
+    getDomainFromCache<S>(Ctor: DomainCtor<S, Root>, path: DomainPath): Domain<S, Root> | undefined {
+        const key = getDomainCacheKey(Ctor as typeof Domain<any, Root>, path)
+        const local = this.localDomainCache.get(key) as Domain<S, Root> | undefined
+        if (local !== undefined) {
+            return local
+        }
+        return this.store.getDomainFromCache(Ctor, path)
     }
 
-    setDomainInCache<StateType>(domain: Domain<StateType, Root>, path: DomainPath): boolean {
-        const key = getDomainCacheKey(domain.constructor as typeof Domain<StateType, Root>, path)
+    setDomainInCache<S>(domain: Domain<S, Root>, path: DomainPath): boolean {
+        const key = getDomainCacheKey((domain as Domain<S, Root>).constructor as typeof Domain<any, Root>, path)
 
         const success = this.store.setDomainInCache(domain, path)
 
@@ -133,7 +350,14 @@ export class Domain<StateType, Root> {
         return success
     }
 
-    /** Narrow state by key === value (e.g. discriminant). Serializable. */
+    getCachedDerivedDomains(): Domain<any, Root>[] {
+        return Array.from(this.localDomainCache.values())
+    }
+
+    removeDerivedFromCache(key: string): void {
+        this.localDomainCache.delete(key)
+    }
+
     match<Key extends keyof StateType & string, Value extends SerializablePrimitives>(
         key: Key,
         value: Value,
@@ -154,18 +378,17 @@ export class Domain<StateType, Root> {
 
         const predicate = (s: StateType): s is Matched => (s as Record<string, unknown>)[key] === value
 
-        domain = new Domain(this.store, this.accessor.match(predicate), path)
+        domain = new Domain(this.store, this.accessor.match(predicate), path, this)
 
         this.setDomainInCache(domain, path)
 
         return domain
     }
 
-    /** Find array item by item[key] === value. Value type inferred from Item[K]. Serializable. */
     find<Key extends keyof Accessor.ArrayItem<StateType> & string>(
         key: Key,
         value: Accessor.ArrayItem<StateType>[Key] & SerializablePrimitives,
-    ): Domain<Accessor.ArrayItem<StateType> & { [K in keyof Accessor.ArrayItem<StateType>]: typeof value }, Root> {
+    ): Domain<Accessor.ArrayItem<StateType>, Root> {
         type Item = Accessor.ArrayItem<StateType>
 
         const path: DomainFindPath = {
@@ -175,9 +398,7 @@ export class Domain<StateType, Root> {
             prev: this.path,
         }
 
-        let domain = this.getDomainFromCache(Domain, path) as
-            | Domain<Item & { [K in keyof Item]: typeof value }, Root>
-            | undefined
+        let domain = this.getDomainFromCache(Domain, path) as Domain<Item, Root> | undefined
 
         if (domain) {
             return domain as any
@@ -185,7 +406,59 @@ export class Domain<StateType, Root> {
 
         const predicate = (item: Item): boolean => (item as Record<string, unknown>)[key] === value
 
-        domain = new Domain(this.store, this.accessor.find(predicate), path)
+        domain = new Domain(this.store, this.accessor.find(predicate), path, this)
+
+        this.setDomainInCache(domain, path)
+
+        return domain
+    }
+
+    filter<Key extends keyof Accessor.ArrayItem<StateType> & string, Value extends SerializablePrimitives>(
+        key: Key,
+        value: Value,
+    ): Domain<Accessor.ArrayItem<StateType>[], Root> {
+        type Item = Accessor.ArrayItem<StateType>
+        const path: DomainFilterPath = {
+            type: 'filter',
+            key,
+            value,
+            prev: this.path,
+        }
+
+        let domain = this.getDomainFromCache(Domain, path) as Domain<Item[], Root> | undefined
+
+        if (domain) {
+            return domain as any
+        }
+
+        const predicate = (item: Item): boolean => (item as Record<string, unknown>)[key] === value
+
+        domain = new Domain(this.store, this.accessor.filter(predicate), path, this)
+
+        this.setDomainInCache(domain, path)
+
+        return domain
+    }
+
+    map<Key extends keyof Accessor.ArrayItem<StateType> & string>(
+        key: Key,
+    ): Domain<Accessor.ArrayItem<StateType>[Key][], Root> {
+        type Item = Accessor.ArrayItem<StateType>
+        const path: DomainMapPath = {
+            type: 'map',
+            key,
+            prev: this.path,
+        }
+
+        let domain = this.getDomainFromCache(Domain, path) as Domain<Item[Key][], Root> | undefined
+
+        if (domain) {
+            return domain as any
+        }
+
+        const itemAccessor = Accessor.root<Item>().prop(key)
+
+        domain = new Domain(this.store, this.accessor.map(itemAccessor), path, this)
 
         this.setDomainInCache(domain, path)
 
@@ -214,31 +487,315 @@ export class Domain<StateType, Root> {
             throw new Error('[koka-domain] Domain.select: invalid key type')
         }
 
-        domain = new Domain(this.store, accessor, path)
+        domain = new Domain(this.store, accessor, path, this)
 
         this.setDomainInCache(domain, path)
 
         return domain
     }
 
-    use<D extends Domain<any, Root>>(Ctor: new (...args: ConstructorParameters<typeof Domain<any, Root>>) => D): D {
-        let domain = this.getDomainFromCache(Ctor as unknown as typeof Domain<any, Root>, this.path) as D | undefined
+    use<Used extends Domain<StateType, Root>>(Ctor: DomainCtor<StateType, Root, Used>): Used {
+        let domain = this.getDomainFromCache(Ctor, this.path) as Used | undefined
 
         if (domain) {
-            return domain as any
+            return domain as Used
         }
 
-        domain = new Ctor(this.store, this.accessor, this.path)
+        domain = new Ctor(this.store, this.accessor, this.path, this)
 
         this.setDomainInCache(domain, this.path)
 
         return domain
     }
+
+    static getParentDomains(domain: AnyDomain): AnyDomain[] {
+        const parentDomain = domain.parentDomain
+        if (parentDomain === undefined) {
+            return []
+        }
+        if (parentDomain instanceof Domain) {
+            return [parentDomain]
+        }
+        return Array.from(parentDomain)
+    }
+
+    static getAncestorDomains(domain: AnyDomain): AnyDomain[] {
+        const ancestorSet = new Set<AnyDomain>()
+        const queue: AnyDomain[] = [domain]
+        while (queue.length > 0) {
+            const current = queue.shift()!
+            if (ancestorSet.has(current)) {
+                continue
+            }
+            ancestorSet.add(current)
+            for (const parent of Domain.getParentDomains(current)) {
+                queue.push(parent)
+            }
+        }
+        const depths = new Map<string, number>()
+        for (const ancestor of ancestorSet) {
+            const parents = Domain.getParentDomains(ancestor)
+            depths.set(ancestor.key, parents.length === 0 ? 0 : -1)
+        }
+        for (let changed = true; changed; ) {
+            changed = false
+            for (const ancestor of ancestorSet) {
+                if (depths.get(ancestor.key)! >= 0) {
+                    continue
+                }
+                const parents = Domain.getParentDomains(ancestor)
+                const maxParentDepth = Math.max(...parents.map((parent: AnyDomain) => depths.get(parent.key) ?? -1))
+                if (maxParentDepth >= 0) {
+                    depths.set(ancestor.key, 1 + maxParentDepth)
+                    changed = true
+                }
+            }
+        }
+        return Array.from(ancestorSet).sort((domainA, domainB) => depths.get(domainA.key)! - depths.get(domainB.key)!)
+    }
 }
+
+// ---------------------------------------------------------------------------
+// Storage classes (class-based DomainStorage, QueryStorage, EffectStorage)
+// ---------------------------------------------------------------------------
+
+export class DomainStorage {
+    readonly domain: AnyDomain
+    private _result: Result<any> | undefined
+    private _version: number | undefined
+    readonly queryStorages = new Map<string, QueryStorage>()
+    readonly usedByQueries = new Map<string, QueryStorage>()
+    readonly usedByEffects = new Map<string, EffectStorage>()
+
+    constructor(domain: AnyDomain) {
+        this.domain = domain
+    }
+
+    get result(): Result<any> | undefined {
+        return this._result
+    }
+    set result(v: Result<any> | undefined) {
+        this._result = v
+    }
+    get version(): number | undefined {
+        return this._version
+    }
+    set version(v: number | undefined) {
+        this._version = v
+    }
+
+    clearResult(): void {
+        this._result = undefined
+        this._version = undefined
+    }
+
+    getResult(): Result<any> {
+        const storeVersion = this.domain.store.version
+        if (this._result !== undefined && this._version === storeVersion) {
+            return this._result as Result<any>
+        }
+        if (this._result !== undefined && this._version !== storeVersion) {
+            this._result = undefined
+            this._version = undefined
+        }
+        this._result = this.domain.store.get(this.domain)
+        this._version = storeVersion
+        return this._result as Result<any>
+    }
+
+    static readonly _cache = new WeakMap<AnyDomain, DomainStorage>()
+
+    static getOrCreate(domain: AnyDomain): DomainStorage {
+        let storage = DomainStorage._cache.get(domain)
+        if (!storage) {
+            storage = new DomainStorage(domain)
+            DomainStorage._cache.set(domain, storage)
+        }
+        return storage
+    }
+
+    static getDomainResult<State, Root = any>(domain: Domain<State, Root>): Result<State> {
+        return DomainStorage.getOrCreate(domain).getResult() as Result<State>
+    }
+}
+
+/** Discriminant for QueryStorage vs EffectStorage. */
+export const StorageKind = { Query: 'query', Effect: 'effect' } as const
+export type StorageKind = (typeof StorageKind)[keyof typeof StorageKind]
+
+export class QueryStorage {
+    readonly _storageKind = StorageKind.Query
+    readonly query: AnyQuery
+    readonly key: string
+    readonly args: Serializable[]
+    readonly domainDeps = new Map<string, DomainStorage>()
+    readonly queryDeps = new Map<string, QueryStorage>()
+    readonly usedByDomains = new Map<string, DomainStorage>()
+    readonly usedByQueries = new Map<string, QueryStorage>()
+    readonly usedByEffects = new Map<string, EffectStorage>()
+    readonly subscribers = new Set<(value: unknown) => unknown>()
+    private _result: Result<any> | undefined
+    private _version: number | undefined
+
+    constructor(query: AnyQuery, key: string, args: Serializable[], domain: AnyDomain, domainStorage: DomainStorage) {
+        this.query = query
+        this.key = key
+        this.args = args
+        this.usedByDomains.set(domain.key, domainStorage)
+    }
+
+    get result(): Result<any> | undefined {
+        return this._result
+    }
+    set result(v: Result<any> | undefined) {
+        this._result = v
+    }
+    get version(): number | undefined {
+        return this._version
+    }
+    set version(v: number | undefined) {
+        this._version = v
+    }
+
+    static getOrCreate(domain: AnyDomain, query: AnyQuery, args: Serializable[], explicitKey?: string): QueryStorage {
+        const domainStorage = DomainStorage.getOrCreate(domain)
+        const queryKey = explicitKey ?? `${query.methodName}(${JSON.stringify(args)})`
+        let queryStorage = domainStorage.queryStorages.get(queryKey)
+        if (!queryStorage) {
+            queryStorage = new QueryStorage(query, queryKey, args, domain, domainStorage)
+            domainStorage.queryStorages.set(queryKey, queryStorage)
+        }
+        return queryStorage
+    }
+
+    static isQueryStorage(x: QueryStorage | EffectStorage): x is QueryStorage {
+        return x._storageKind === StorageKind.Query
+    }
+}
+
+export class EffectStorage {
+    readonly _storageKind = StorageKind.Effect
+    readonly domain: AnyDomain
+    readonly key: string
+    readonly domainDeps = new Map<string, DomainStorage>()
+    readonly queryDeps = new Map<string, QueryStorage>()
+    private _abortController: AbortController | null = null
+    readonly methods: AnyEffectMethod[]
+
+    constructor(domain: AnyDomain, key: string, methods: AnyEffectMethod[]) {
+        this.domain = domain
+        this.key = key
+        this.methods = methods
+    }
+
+    get abortController(): AbortController | null {
+        return this._abortController
+    }
+    set abortController(c: AbortController | null) {
+        this._abortController = c
+    }
+
+    abort(): void {
+        if (this._abortController) {
+            this._abortController.abort()
+        }
+    }
+
+    removeFromUsedBy(): void {
+        for (const domainStorage of this.domainDeps.values()) {
+            domainStorage.usedByEffects.delete(this.key)
+        }
+        for (const queryStorage of this.queryDeps.values()) {
+            queryStorage.usedByEffects.delete(this.key)
+        }
+    }
+
+    clearDeps(): void {
+        this.domainDeps.clear()
+        this.queryDeps.clear()
+    }
+}
+
+type QueryOrEffectStorage = QueryStorage | EffectStorage
+
+function topologicalSortDirty(storages: Set<QueryOrEffectStorage>): QueryOrEffectStorage[] {
+    const result: QueryOrEffectStorage[] = []
+    const visited = new Set<QueryOrEffectStorage>()
+    const visiting = new Set<QueryOrEffectStorage>()
+
+    function getDeps(node: QueryOrEffectStorage): QueryOrEffectStorage[] {
+        const deps: QueryOrEffectStorage[] = []
+        for (const dep of node.queryDeps.values()) {
+            if (storages.has(dep)) {
+                deps.push(dep)
+            }
+        }
+        return deps
+    }
+
+    function visit(node: QueryOrEffectStorage): void {
+        if (visited.has(node)) {
+            return
+        }
+        if (visiting.has(node)) {
+            return
+        }
+        visiting.add(node)
+        for (const dep of getDeps(node)) {
+            visit(dep)
+        }
+        visiting.delete(node)
+        visited.add(node)
+        result.push(node)
+    }
+
+    for (const node of storages) {
+        visit(node)
+    }
+    return result
+}
+
+// ---------------------------------------------------------------------------
+// AnyStore & store/domain inference types (after Store/Domain class)
+// ---------------------------------------------------------------------------
+
+export type AnyStore = Store<any>
+
+export type InferStoreState<S> = S extends Store<infer State> ? State : never
+export type InferDomainState<S> = S extends Domain<infer StateType, any> ? StateType : never
+export type InferDomainRoot<S> = S extends Domain<any, infer Root> ? Root : never
 
 export type ObjectShape<Root, Shape extends Record<string, Domain<any, Root>>> = {
     [K in keyof Shape]: Shape[K] extends Domain<infer State, Root> ? State : never
 }
+
+export type StoreCtor<S extends AnyStore = AnyStore> =
+    | (abstract new <Root>(options: StoreOptions<Root>) => S)
+    | (new <Root>(options: StoreOptions<Root>) => S)
+
+// ---------------------------------------------------------------------------
+// shallowEqualResult
+// ---------------------------------------------------------------------------
+
+export function shallowEqualResult<T>(resultA: Result<T>, resultB: Result<T>): boolean {
+    if (resultA === resultB) {
+        return true
+    }
+
+    if (resultA.type === 'ok' && resultB.type === 'ok') {
+        return shallowEqual(resultA.value, resultB.value)
+    }
+
+    if (resultA.type === 'err' && resultB.type === 'err') {
+        return shallowEqual(resultA.error, resultB.error)
+    }
+
+    return false
+}
+
+// ---------------------------------------------------------------------------
+// object / union / optional
+// ---------------------------------------------------------------------------
 
 export function object<Root, Shape extends Record<string, Domain<any, Root>>>(
     shape: Shape,
@@ -276,7 +833,7 @@ export function object<Root, Shape extends Record<string, Domain<any, Root>>>(
 
     const accessor = Accessor.object(accessors) as Accessor.Accessor<ObjectShape<Root, Shape>, Root>
 
-    domain = new Domain(store, accessor, path)
+    domain = new Domain(store, accessor, path, new Set(Object.values(shape)))
 
     store.setDomainInCache(domain, path)
 
@@ -316,7 +873,7 @@ export function union<Root, Variants extends Domain<any, Root>[]>(
 
     const accessor = Accessor.union(accessors) as Accessor.Accessor<InferDomainState<Variants[number]>, Root>
 
-    domain = new Domain(store, accessor, path)
+    domain = new Domain(store, accessor, path, new Set(variants))
 
     store.setDomainInCache(domain, path)
 
@@ -341,109 +898,512 @@ export function optional<Root, Inner extends Domain<any, Root>>(
 
     const accessor = Accessor.optional(inner.accessor) as Accessor.Accessor<InferDomainState<Inner> | undefined, Root>
 
-    domain = new Domain(inner.store, accessor, path)
+    domain = new Domain(inner.store, accessor, path, inner)
 
     inner.store.setDomainInCache(domain, path)
 
     return domain
 }
 
-export type PureDomain<StateType, Root> = {
-    store: Store<Root>
-    accessor: Accessor.Accessor<StateType, Root>
-    path: DomainPath
-    parent?: PureDomain<any, Root>
-    key: string
+// ---------------------------------------------------------------------------
+// Generator run metadata (WeakMap<gen, metadata> for query/command/event)
+// ---------------------------------------------------------------------------
+
+export type GenRunMeta = {
+    domain: AnyDomain
+    methodName: string
+    args: Serializable[]
+    /** Query only: args -> cacheKey for incremental computation, set in @query decorator */
+    cacheKey?: string
 }
 
-const getKeyFromPathCache = new WeakMap<DomainPath, string>()
+const genToMeta = new WeakMap<Generator<GenRequest, unknown, unknown>, GenRunMeta>()
 
-export function getKeyFromPath(path: DomainPath): string {
-    const cached = getKeyFromPathCache.get(path)
-    if (cached) return cached
-    const result = getKeyFromPathImpl(path)
-    getKeyFromPathCache.set(path, result)
-    return result
+export function getGenRunMeta(gen: Generator<GenRequest, unknown, unknown>): GenRunMeta | undefined {
+    return genToMeta.get(gen)
 }
 
-function getKeyFromPathImpl(path: DomainPath): string {
-    if (path.type === 'root') {
-        return 'root'
-    }
+function registerGen(gen: Generator<GenRequest, unknown, unknown>, meta: GenRunMeta): void {
+    genToMeta.set(gen, meta)
+}
 
-    if (path.type === 'select') {
-        const prevKey = getKeyFromPath(path.prev)
-        return prevKey + '.' + path.key
-    }
+type FiberState<Root> = {
+    gen: Generator<GenRequest, unknown, unknown>
+    stack: Array<{ gen: Generator<GenRequest, unknown, unknown>; sendValue: unknown }>
+    sendValue: unknown
+}
 
-    if (path.type === 'match') {
-        const prevKey = getKeyFromPath(path.prev)
-        return prevKey + '.' + `match(${path.key}=${path.value})`
-    }
-    if (path.type === 'find') {
-        const prevKey = getKeyFromPath(path.prev)
-        return prevKey + '.' + `find(${path.key}=${path.value})`
-    }
+function runFiberUntilWaitOrDone<Root>(
+    store: Store<Root>,
+    fiber: FiberState<Root>,
+): { done: unknown } | { wait: Promise<unknown>; state: FiberState<Root> } {
+    let current = fiber.gen
+    let sendValue = fiber.sendValue
+    const stack = [...fiber.stack]
 
-    if (path.type === 'object') {
-        let args = ''
-
-        for (const [key, subPath] of Object.entries(path.shape)) {
-            args += `${key}:${getKeyFromPath(subPath)}, `
+    for (;;) {
+        const step = current.next(sendValue)
+        if (step.done) {
+            const returnValue = step.value
+            if (stack.length === 0) return { done: returnValue }
+            const prev = stack.pop()!
+            current = prev.gen
+            sendValue = returnValue
+            continue
         }
-
-        return `object(${args})`
-    }
-    if (path.type === 'union') {
-        let args = ''
-
-        for (const variant of path.variants) {
-            args += `${getKeyFromPath(variant)} | `
+        const yielded = step.value
+        if (
+            yielded &&
+            typeof (yielded as unknown as Generator).next === 'function' &&
+            genToMeta.has(yielded as unknown as Generator<GenRequest, unknown, unknown>)
+        ) {
+            const subGen = yielded as unknown as Generator<GenRequest, unknown, unknown>
+            stack.push({ gen: current, sendValue })
+            current = subGen
+            sendValue = undefined
+            continue
         }
-
-        return `union(${args})`
+        const req = yielded as GenRequest
+        if (req.type === 'get') {
+            const result = DomainStorage.getDomainResult(req.domain)
+            if (result.type === 'err') return { done: undefined }
+            sendValue = result.value
+            continue
+        }
+        if (req.type === 'getResult') {
+            sendValue = DomainStorage.getDomainResult(req.domain)
+            continue
+        }
+        if (req.type === 'set') {
+            const res = store.set(req.domain as Domain<unknown, Root>, req.setStateInput as SetStateInput<unknown>)
+            if (res !== null && typeof res === 'object' && (res as Result<unknown>).type === 'err')
+                return { done: undefined }
+            sendValue = res
+            continue
+        }
+        if (req.type === 'emit') {
+            store.emitEvent(req.event)
+            sendValue = undefined
+            continue
+        }
+        if (req.type === 'wait') {
+            fiber.gen = current
+            fiber.stack = stack
+            fiber.sendValue = sendValue
+            return { wait: req.promise, state: fiber }
+        }
+        if (req.type === 'all') {
+            throw new Error('[koka-domain] all() cannot be nested inside all()')
+        }
+        req as never satisfies never
+        throw new Error('[koka-domain] runFiberUntilWaitOrDone: unknown request')
     }
+}
 
-    if (path.type === 'optional') {
-        return `optional(${getKeyFromPath(path.inner)})`
+function runAllParallel<Root>(
+    store: Store<Root>,
+    generators: Generator<GenRequest, unknown, unknown>[],
+): Promise<unknown[]> {
+    const fibers: (FiberState<Root> | null)[] = generators.map((gen) => ({ gen, stack: [], sendValue: undefined }))
+    const results: unknown[] = new Array(generators.length)
+
+    function step(): Promise<unknown[]> {
+        const waits: { fiber: FiberState<Root>; promise: Promise<unknown> }[] = []
+        for (let i = 0; i < fibers.length; i++) {
+            const fiber = fibers[i]
+            if (fiber === null) continue
+            const r = runFiberUntilWaitOrDone(store, fiber)
+            if ('done' in r) {
+                results[i] = r.done
+                fibers[i] = null
+            } else {
+                waits.push({ fiber: r.state, promise: r.wait })
+            }
+        }
+        if (waits.length > 0) {
+            return Promise.all(waits.map((w) => w.promise)).then((values) => {
+                waits.forEach((w, idx) => {
+                    w.fiber.sendValue = values[idx]
+                })
+                return step()
+            })
+        }
+        return Promise.resolve(results)
     }
-
-    path satisfies never
-
-    throw new Error('[koka-domain] getKeyFromPath: invalid path type')
+    return step()
 }
 
-export type AnyDomain = Domain<any, any>
+function runGenerator<Root>(
+    store: Store<Root>,
+    gen: Generator<GenRequest, unknown, unknown>,
+    queryStorage: QueryStorage | null,
+    effectStorage: EffectStorage | null = null,
+): unknown {
+    let sendValue: unknown = undefined
+    let current: Generator<GenRequest, unknown, unknown> = gen
+    let currentQueryStorage: QueryStorage | null = queryStorage
+    let currentEffectStorage: EffectStorage | null = effectStorage
+    const stack: Array<{
+        gen: Generator<GenRequest, unknown, unknown>
+        queryStorage: QueryStorage | null
+        effectStorage: EffectStorage | null
+    }> = []
 
-let domainCtorUid = 0
-
-export function getDomainCtorKey(DomainCtor: new (...args: any[]) => AnyDomain): string {
-    return `${(DomainCtor as Function).name ?? 'Anonymous'}:${domainCtorUid++}`
+    for (;;) {
+        const step = current.next(sendValue)
+        if (step.done) {
+            const returnValue = step.value
+            if (stack.length === 0) {
+                if (currentQueryStorage) {
+                    currentQueryStorage.result = Accessor.ok(returnValue) as Result<any>
+                    currentQueryStorage.version = store.version
+                }
+                return returnValue
+            }
+            const prev = stack.pop()!
+            current = prev.gen
+            currentQueryStorage = prev.queryStorage
+            currentEffectStorage = prev.effectStorage
+            sendValue = returnValue
+            continue
+        }
+        const yielded = step.value
+        if (
+            yielded &&
+            typeof (yielded as unknown as Generator).next === 'function' &&
+            genToMeta.has(yielded as unknown as Generator<GenRequest, unknown, unknown>)
+        ) {
+            const subGen = yielded as unknown as Generator<GenRequest, unknown, unknown>
+            const meta = genToMeta.get(subGen)!
+            const queryRef = (meta.domain as any)[meta.methodName] as AnyQuery | undefined
+            let subStorage: QueryStorage | null = null
+            if (queryRef) {
+                subStorage = QueryStorage.getOrCreate(meta.domain, queryRef, meta.args, meta.cacheKey)
+                if (currentQueryStorage) {
+                    currentQueryStorage.queryDeps.set(subStorage.key, subStorage)
+                    subStorage.usedByQueries.set(currentQueryStorage.key, currentQueryStorage)
+                }
+                if (currentEffectStorage) {
+                    currentEffectStorage.queryDeps.set(subStorage.key, subStorage)
+                    subStorage.usedByEffects.set(currentEffectStorage.key, currentEffectStorage)
+                }
+                if (
+                    subStorage.result !== undefined &&
+                    subStorage.version === store.version &&
+                    subStorage.result.type === 'ok'
+                ) {
+                    sendValue = subStorage.result.value
+                    continue
+                }
+            }
+            stack.push({ gen: current, queryStorage: currentQueryStorage, effectStorage: currentEffectStorage })
+            current = subGen
+            currentQueryStorage = subStorage
+            sendValue = undefined
+            continue
+        }
+        const req = yielded as GenRequest
+        if (req.type === 'get') {
+            const domainStorage = DomainStorage.getOrCreate(req.domain)
+            if (currentQueryStorage) {
+                currentQueryStorage.domainDeps.set(domainStorage.domain.key, domainStorage)
+                domainStorage.usedByQueries.set(currentQueryStorage.key, currentQueryStorage)
+            }
+            if (currentEffectStorage) {
+                currentEffectStorage.domainDeps.set(domainStorage.domain.key, domainStorage)
+                domainStorage.usedByEffects.set(currentEffectStorage.key, currentEffectStorage)
+            }
+            const result = DomainStorage.getDomainResult(req.domain)
+            if (result.type === 'err') {
+                if (currentEffectStorage) return
+                throw result.error
+            }
+            sendValue = result.value
+        } else if (req.type === 'getResult') {
+            const domainStorage = DomainStorage.getOrCreate(req.domain)
+            if (currentQueryStorage) {
+                currentQueryStorage.domainDeps.set(domainStorage.domain.key, domainStorage)
+                domainStorage.usedByQueries.set(currentQueryStorage.key, currentQueryStorage)
+            }
+            if (currentEffectStorage) {
+                currentEffectStorage.domainDeps.set(domainStorage.domain.key, domainStorage)
+                domainStorage.usedByEffects.set(currentEffectStorage.key, currentEffectStorage)
+            }
+            sendValue = DomainStorage.getDomainResult(req.domain)
+        } else if (req.type === 'set') {
+            sendValue = store.set(req.domain as Domain<unknown, Root>, req.setStateInput as SetStateInput<unknown>)
+            if (
+                currentEffectStorage &&
+                sendValue !== null &&
+                typeof sendValue === 'object' &&
+                (sendValue as Result<unknown>).type === 'err'
+            ) {
+                return
+            }
+        } else if (req.type === 'emit') {
+            store.emitEvent(req.event)
+            sendValue = undefined
+        } else if (req.type === 'wait') {
+            req.promise.then(
+                (value) => {
+                    runGeneratorStep(store, current, value, stack, currentQueryStorage, currentEffectStorage)
+                },
+                (reason) => {
+                    runGeneratorStep(
+                        store,
+                        current,
+                        undefined,
+                        stack,
+                        currentQueryStorage,
+                        currentEffectStorage,
+                        reason,
+                    )
+                },
+            )
+            return
+        } else if (req.type === 'all') {
+            runAllParallel(store, req.generators).then((results) => {
+                runGeneratorStep(store, current, results, stack, currentQueryStorage, currentEffectStorage)
+            })
+            return
+        } else {
+            req as never satisfies never
+            throw new Error('[koka-domain] runGenerator: unknown request')
+        }
+    }
 }
 
-export function getDomainCacheKey<StateType, Root>(Ctor: typeof Domain<StateType, Root>, path: DomainPath): string {
-    return getDomainCtorKey(Ctor) + ':' + getKeyFromPath(path)
+function runGeneratorStep<Root>(
+    store: Store<Root>,
+    current: Generator<GenRequest, unknown, unknown>,
+    sendValue: unknown,
+    stack: Array<{
+        gen: Generator<GenRequest, unknown, unknown>
+        queryStorage: QueryStorage | null
+        effectStorage: EffectStorage | null
+    }>,
+    currentQueryStorage: QueryStorage | null,
+    currentEffectStorage: EffectStorage | null,
+    throwReason?: unknown,
+): void {
+    let step: IteratorResult<GenRequest, unknown>
+    if (throwReason !== undefined) {
+        try {
+            step = current.throw(throwReason)
+        } catch (e) {
+            if (stack.length === 0) throw e
+            const prev = stack.pop()!
+            runGeneratorStep(store, prev.gen, e, stack, prev.queryStorage, prev.effectStorage, e)
+            return
+        }
+    } else {
+        step = current.next(sendValue)
+    }
+    if (step.done) {
+        const returnValue = step.value
+        if (stack.length === 0) {
+            if (currentQueryStorage) {
+                currentQueryStorage.result = Accessor.ok(returnValue) as Result<any>
+                currentQueryStorage.version = store.version
+            }
+            return
+        }
+        const prev = stack.pop()!
+        runGeneratorStep(store, prev.gen, returnValue, stack, prev.queryStorage, prev.effectStorage)
+        return
+    }
+    const yielded = step.value
+    if (
+        yielded &&
+        typeof (yielded as unknown as Generator).next === 'function' &&
+        genToMeta.has(yielded as unknown as Generator<GenRequest, unknown, unknown>)
+    ) {
+        const subGen = yielded as unknown as Generator<GenRequest, unknown, unknown>
+        const meta = genToMeta.get(subGen)!
+        const queryRef = (meta.domain as any)[meta.methodName] as AnyQuery | undefined
+        let subStorage: QueryStorage | null = null
+        if (queryRef) {
+            subStorage = QueryStorage.getOrCreate(meta.domain, queryRef, meta.args, meta.cacheKey)
+            if (currentQueryStorage) {
+                currentQueryStorage.queryDeps.set(subStorage.key, subStorage)
+                subStorage.usedByQueries.set(currentQueryStorage.key, currentQueryStorage)
+            }
+            if (currentEffectStorage) {
+                currentEffectStorage.queryDeps.set(subStorage.key, subStorage)
+                subStorage.usedByEffects.set(currentEffectStorage.key, currentEffectStorage)
+            }
+            if (
+                subStorage.result !== undefined &&
+                subStorage.version === store.version &&
+                subStorage.result.type === 'ok'
+            ) {
+                runGeneratorStep(
+                    store,
+                    current,
+                    subStorage.result.value,
+                    stack,
+                    currentQueryStorage,
+                    currentEffectStorage,
+                )
+                return
+            }
+        }
+        stack.push({ gen: current, queryStorage: currentQueryStorage, effectStorage: currentEffectStorage })
+        runGeneratorStep(store, subGen, undefined, stack, subStorage, currentEffectStorage)
+        return
+    }
+    const req = yielded as GenRequest
+    if (req.type === 'get') {
+        const domainStorage = DomainStorage.getOrCreate(req.domain)
+        if (currentQueryStorage) {
+            currentQueryStorage.domainDeps.set(domainStorage.domain.key, domainStorage)
+            domainStorage.usedByQueries.set(currentQueryStorage.key, currentQueryStorage)
+        }
+        if (currentEffectStorage) {
+            currentEffectStorage.domainDeps.set(domainStorage.domain.key, domainStorage)
+            domainStorage.usedByEffects.set(currentEffectStorage.key, currentEffectStorage)
+        }
+        const result = DomainStorage.getDomainResult(req.domain)
+        if (result.type === 'err') {
+            if (currentEffectStorage) return
+            throw result.error
+        }
+        runGeneratorStep(store, current, result.value, stack, currentQueryStorage, currentEffectStorage)
+        return
+    }
+    if (req.type === 'getResult') {
+        const domainStorage = DomainStorage.getOrCreate(req.domain)
+        if (currentQueryStorage) {
+            currentQueryStorage.domainDeps.set(domainStorage.domain.key, domainStorage)
+            domainStorage.usedByQueries.set(currentQueryStorage.key, currentQueryStorage)
+        }
+        if (currentEffectStorage) {
+            currentEffectStorage.domainDeps.set(domainStorage.domain.key, domainStorage)
+            domainStorage.usedByEffects.set(currentEffectStorage.key, currentEffectStorage)
+        }
+        const res = DomainStorage.getDomainResult(req.domain)
+        if (res !== null && typeof res === 'object' && (res as Result<unknown>).type === 'err') {
+            if (currentEffectStorage) return
+        }
+        runGeneratorStep(store, current, res, stack, currentQueryStorage, currentEffectStorage)
+        return
+    }
+    if (req.type === 'set') {
+        const newSendValue = store.set(req.domain as Domain<unknown, Root>, req.setStateInput as SetStateInput<unknown>)
+        if (
+            currentEffectStorage &&
+            newSendValue !== null &&
+            typeof newSendValue === 'object' &&
+            (newSendValue as Result<unknown>).type === 'err'
+        ) {
+            return
+        }
+        runGeneratorStep(store, current, newSendValue, stack, currentQueryStorage, currentEffectStorage)
+        return
+    }
+    if (req.type === 'emit') {
+        store.emitEvent(req.event)
+        runGeneratorStep(store, current, undefined, stack, currentQueryStorage, currentEffectStorage)
+        return
+    }
+    if (req.type === 'wait') {
+        req.promise.then(
+            (value) => {
+                runGeneratorStep(store, current, value, stack, currentQueryStorage, currentEffectStorage)
+            },
+            (reason) => {
+                runGeneratorStep(store, current, undefined, stack, currentQueryStorage, currentEffectStorage, reason)
+            },
+        )
+        return
+    }
+    if (req.type === 'all') {
+        runAllParallel(store, req.generators).then((results) => {
+            runGeneratorStep(store, current, results, stack, currentQueryStorage, currentEffectStorage)
+        })
+        return
+    }
+    req as never satisfies never
+    throw new Error('[koka-domain] runGenerator: unknown request')
 }
 
-export class Store<Root> {
+// ---------------------------------------------------------------------------
+// Generator helpers (yield request shape, return with as-cast)
+// ---------------------------------------------------------------------------
+
+export function* get<State, Root = any>(domain: Domain<State, Root>): Generator<GenGetRequest, State, unknown> {
+    const state = yield { type: 'get', domain: domain as AnyDomain }
+    return state as State
+}
+
+export function* getResult<State, Root = any>(
+    domain: Domain<State, Root>,
+): Generator<GenGetResultRequest, Result<State>, unknown> {
+    const result = yield { type: 'getResult', domain: domain as AnyDomain }
+    return result as Result<State>
+}
+
+export function* set<State, Root = any>(
+    domain: Domain<State, Root>,
+    setStateInput: SetStateInput<State>,
+): Generator<GenSetRequest, Result<Root>, unknown> {
+    const result = yield { type: 'set', domain: domain as AnyDomain, setStateInput }
+    return result as Result<Root>
+}
+
+export function* emit<E extends AnyEvent>(event: E): Generator<GenEmitRequest, void, unknown> {
+    yield { type: 'emit', event }
+}
+
+/**
+ * Suspend effect execution until the given promise resolves or rejects. Only use inside @effect.
+ * Resolves: returns the resolved value (runner calls gen.next(value)). Rejects: runner calls gen.throw(reason), so try/catch works.
+ */
+export function* waitFor<T>(promise: Promise<T>): Generator<GenWaitRequest, T, unknown> {
+    const value = yield { type: 'wait', promise }
+    return value as T
+}
+
+/**
+ * Run multiple command/effect generators in parallel. Wait requests are collected each "frame"
+ * and Promise.all'd before resuming all fibers, so e.g. multiple removeTodo() animations
+ * advance in lockstep. Returns array of return values.
+ */
+export function* all<T>(generators: Generator<GenRequest, T, unknown>[]): Generator<GenAllRequest, T[], unknown> {
+    const results = yield { type: 'all', generators: generators as Generator<GenRequest, unknown, unknown>[] }
+    return results as T[]
+}
+
+const effectMethodsStorage = new WeakMap<new (...args: any[]) => any, Map<string, AnyEffectMethod>>()
+
+const getEffectfulMethods = (domain: AnyDomain): Map<string, AnyEffectMethod> | undefined => {
+    return effectMethodsStorage.get(domain.constructor as new (...args: any[]) => any)
+}
+
+// ---------------------------------------------------------------------------
+// Store class
+// ---------------------------------------------------------------------------
+
+export class Store<Root> implements IStore<Root> {
     state: Root
     domain: Domain<Root, Root>
 
-    plugins: StorePlugin<Root, this>[] = []
+    plugins: StorePlugin<Root>[] = []
     private pluginCleanup: (() => void)[] = []
 
     constructor(options: StoreOptions<Root>) {
         this.state = options.state
         this.domain = new Domain<Root, Root>(this, Accessor.root<Root>(), { type: 'root' })
+        this.setDomainInCache(this.domain, { type: 'root' })
 
-        this.plugins = [...this.plugins, ...(options.plugins ?? [])]
+        this.plugins = [...this.plugins, ...(options.plugins ?? [])] as StorePlugin<Root>[]
 
         for (const plugin of this.plugins) {
             this.addPlugin(plugin)
         }
     }
 
-    addPlugin(plugin: StorePlugin<Root, this>) {
+    addPlugin(plugin: StorePlugin<Root>) {
         const cleanup = plugin(this)
         if (cleanup) {
             this.pluginCleanup.push(cleanup)
@@ -464,12 +1424,17 @@ export class Store<Root> {
     }
 
     setState(state: Root): void {
+        if (shallowEqual(this.state, state)) {
+            return
+        }
         this.state = state
         this.dirty = true
         this.version += 1
         const currentVersion = this.version
         this.promise = Promise.resolve().then(() => {
-            if (currentVersion === this.version) this.publish()
+            if (currentVersion === this.version) {
+                this.publish()
+            }
         })
     }
 
@@ -486,17 +1451,27 @@ export class Store<Root> {
         return result
     }
 
-    /** Subscribe to state changes at a State reference. */
-    subscribeDomain<S>(domain: Domain<S, Root>, subscriber: (state: S) => unknown): () => void {
-        let previous: Result<S> | undefined
-        return this.subscribeState(() => {
+    subscribeToDomain<S>(domain: Domain<S, Root>, callback: (result: Result<S>) => unknown): () => void {
+        this.refDomainAndAncestors(domain)
+        let previous: Result<S> = this.get(domain)
+        const unsubscribeState = this.subscribeState(() => {
             const current = this.get(domain)
-            if (previous !== undefined && shallowEqualResult(previous, current)) {
+            if (shallowEqualResult(previous, current)) {
                 return
             }
             previous = current
-            if (current.type === 'ok') {
-                subscriber(current.value)
+            callback(current)
+        })
+        return () => {
+            unsubscribeState()
+            this.unrefDomainAndAncestors(domain)
+        }
+    }
+
+    subscribeDomain<S>(domain: Domain<S, Root>, subscriber: (state: S) => unknown): () => void {
+        return this.subscribeToDomain(domain, (result) => {
+            if (result.type === 'ok') {
+                subscriber(result.value)
             }
         })
     }
@@ -535,78 +1510,119 @@ export class Store<Root> {
         }
     }
 
-    /** Top-down from store.domain: compare each domain’s cached result (last read) vs current state; prune when unchanged. */
     private getAffectedDomainStoragesFromDiff(): Set<DomainStorage> {
         const affected = new Set<DomainStorage>()
-        const rootDs = this.getRootDomainStorage()
+        const domains = Array.from(this.domainCache.values())
 
-        const visit = (ds: DomainStorage) => {
-            const cached = ds.result
-            const current = Accessor.get(this.state, ds.domain.accessor)
-            if (cached !== undefined && shallowEqualResult(cached, current)) return
-            if (cached !== undefined) {
-                affected.add(ds)
-                ds.result = undefined
+        for (const domain of domains) {
+            const key = getDomainCacheKey(domain.constructor as typeof Domain<any, Root>, domain.path)
+            if (!this.domainCache.has(key)) {
+                continue
             }
-            for (const c of ds.children) visit(c)
+
+            const domainStorage = DomainStorage.getOrCreate(domain)
+            const cached = domainStorage.result
+            const current = Accessor.get(this.state, domain.accessor)
+
+            if (cached !== undefined && (cached.type as string) !== (current.type as string)) {
+                this.removeDomainAndSubtree(domain)
+                continue
+            }
+
+            if (cached !== undefined && !shallowEqualResult(cached, current)) {
+                affected.add(domainStorage)
+                domainStorage.clearResult()
+            } else if (
+                cached === undefined &&
+                domainStorage.usedByQueries.size + domainStorage.usedByEffects.size > 0
+            ) {
+                // result 已被清空但有 query/effect 依赖，仍需传播以触发重算
+                affected.add(domainStorage)
+            }
         }
-        visit(rootDs)
+
         return affected
     }
 
-    /**
-     * Affected domain storages (from top-down diff with prune) → dependent query closure → topological sort → single pass.
-     */
     private propagateFromAffectedDomainStorages(affectedDomainStorages: Set<DomainStorage>): void {
-        const directDirty = new Set<QueryStorage>()
-        for (const ds of affectedDomainStorages) {
-            for (const qs of ds.usedBy.values()) {
-                directDirty.add(qs)
+        const directDirty = new Set<QueryOrEffectStorage>()
+        for (const domainStorage of affectedDomainStorages) {
+            for (const dependent of domainStorage.usedByQueries.values()) {
+                directDirty.add(dependent)
+            }
+            for (const dependent of domainStorage.usedByEffects.values()) {
+                directDirty.add(dependent)
             }
         }
 
-        const allDirty = new Set<QueryStorage>(directDirty)
-        const collectUsedBy = (q: QueryStorage) => {
-            for (const u of q.usedBy.values()) {
-                if (!allDirty.has(u)) {
-                    allDirty.add(u)
-                    collectUsedBy(u)
+        const allDirty = new Set<QueryOrEffectStorage>(directDirty)
+        const collectUsedBy = (node: QueryOrEffectStorage): void => {
+            if (!QueryStorage.isQueryStorage(node)) {
+                return
+            }
+            for (const dependent of node.usedByQueries.values()) {
+                if (!allDirty.has(dependent)) {
+                    allDirty.add(dependent)
+                    collectUsedBy(dependent)
+                }
+            }
+            for (const dependent of node.usedByEffects.values()) {
+                if (!allDirty.has(dependent)) {
+                    allDirty.add(dependent)
+                    collectUsedBy(dependent)
                 }
             }
         }
-        for (const qs of directDirty) {
-            collectUsedBy(qs)
+        for (const node of directDirty) {
+            collectUsedBy(node)
         }
 
-        const sorted = topologicalSortQueryStorages(allDirty)
+        const sorted = topologicalSortDirty(allDirty)
         const changed = new Set<QueryStorage>()
         const toNotify = new Set<QueryStorage>()
 
-        const checkUpstreamChange = (qs: QueryStorage) => {
-            for (const dep of qs.queryDeps.values()) {
-                if (changed.has(dep)) return true
+        const checkUpstreamChange = (queryStorage: QueryStorage): boolean => {
+            for (const dep of queryStorage.queryDeps.values()) {
+                if (changed.has(dep)) {
+                    return true
+                }
             }
             return false
         }
 
-        for (const qs of sorted) {
-            const hasUpstreamChange = directDirty.has(qs) || checkUpstreamChange(qs)
-            if (!hasUpstreamChange) continue
+        for (const node of sorted) {
+            if (QueryStorage.isQueryStorage(node)) {
+                const queryStorage = node
+                const hasUpstreamChange = directDirty.has(queryStorage) || checkUpstreamChange(queryStorage)
+                if (!hasUpstreamChange) {
+                    continue
+                }
 
-            const oldReturn = qs.current?.return
-            qs.current = undefined
-            this.runQuery(qs.query, ...qs.args)
-            const newReturn = qs.current!.return
-            if (!shallowEqual(oldReturn, newReturn)) {
-                changed.add(qs)
-                toNotify.add(qs)
+                const oldReturn = queryStorage.result?.type === 'ok' ? queryStorage.result.value : undefined
+                queryStorage.result = undefined
+                queryStorage.version = undefined
+                try {
+                    const gen = queryStorage.query.call(queryStorage.query.domain, ...queryStorage.args) as AnyQueryRun
+                    this.runQuery(gen)
+                } catch (_) {
+                    // query 抛错（如 errorQuery 在 filter !== 'done' 时），不加入 toNotify，避免打断 publish
+                    continue
+                }
+                const resultAfter = queryStorage.result as Result<any> | undefined
+                const newReturn = resultAfter?.type === 'ok' ? resultAfter.value : undefined
+                if (newReturn !== undefined && !shallowEqual(oldReturn, newReturn)) {
+                    changed.add(queryStorage)
+                    toNotify.add(queryStorage)
+                }
+            } else {
+                this.runEffect(node)
             }
         }
 
-        for (const qs of toNotify) {
-            const value = qs.current!.return
-            for (const sub of qs.subscribers) {
-                sub(value)
+        for (const queryStorage of toNotify) {
+            const value = queryStorage.result?.type === 'ok' ? queryStorage.result.value : undefined
+            for (const subscriber of queryStorage.subscribers) {
+                subscriber(value)
             }
         }
     }
@@ -623,13 +1639,98 @@ export class Store<Root> {
 
         this.pluginCleanup = []
         this.domainCache.clear()
+
+        for (const effectStorage of this.effectStorages.values()) {
+            effectStorage.abort()
+            effectStorage.removeFromUsedBy()
+        }
+        this.effectStorages.clear()
+        this.effectRefCount.clear()
     }
 
     private domainCache = new Map<string, Domain<any, Root>>()
 
-    private eventSubscribers = new Map<AnyEventCtor, EventHandler<AnyEventCtor, Root>[]>()
+    private effectRefCount = new Map<string, number>()
+    private effectStorages = new Map<string, EffectStorage>()
 
-    subscribeEvent<E extends AnyEventCtor>(event: E, handler: EventHandler<E, Root>): () => void {
+    private refDomainAndAncestors(domain: AnyDomain): void {
+        const ancestors = Domain.getAncestorDomains(domain)
+        for (const ancestor of ancestors) {
+            const key = ancestor.key
+            const prev = this.effectRefCount.get(key) ?? 0
+            const next = prev + 1
+            this.effectRefCount.set(key, next)
+            if (next === 1) {
+                this.startEffect(ancestor)
+            }
+        }
+    }
+
+    private unrefDomainAndAncestors(domain: AnyDomain): void {
+        const ancestors = Domain.getAncestorDomains(domain)
+        for (const ancestor of ancestors) {
+            const key = ancestor.key
+            const prev = this.effectRefCount.get(key) ?? 0
+            const next = Math.max(0, prev - 1)
+            if (next === 0) {
+                this.effectRefCount.delete(key)
+            } else {
+                this.effectRefCount.set(key, next)
+            }
+            if (prev === 1) {
+                this.stopEffect(ancestor)
+            }
+        }
+    }
+
+    private startEffect(domain: AnyDomain): void {
+        const methods = getEffectfulMethods(domain)?.values()
+        if (!methods) {
+            return
+        }
+        const methodsArr = Array.from(methods)
+        if (methodsArr.length === 0) {
+            return
+        }
+        const key = 'effect:' + domain.key
+        const effectStorage = new EffectStorage(domain, key, methodsArr)
+        this.effectStorages.set(domain.key, effectStorage)
+        this.runEffect(effectStorage)
+    }
+
+    private stopEffect(domain: AnyDomain): void {
+        const effectStorage = this.effectStorages.get(domain.key)
+        if (!effectStorage) {
+            return
+        }
+        effectStorage.abort()
+        effectStorage.removeFromUsedBy()
+        this.effectStorages.delete(domain.key)
+    }
+
+    private runEffect(effectStorage: EffectStorage): void {
+        effectStorage.abort()
+        const controller = new AbortController()
+        effectStorage.abortController = controller
+        effectStorage.removeFromUsedBy()
+        effectStorage.clearDeps()
+        const effectContext: EffectContext = {
+            abortSignal: controller.signal,
+            abortController: controller,
+        }
+        try {
+            const domain = effectStorage.domain
+            for (const method of effectStorage.methods) {
+                runGenerator(this, method.call(domain, effectContext), null, effectStorage)
+            }
+        } catch (_) {
+            // Single effect run failure; avoid breaking publish
+        }
+    }
+
+    private eventSubscribers = new Map<AnyEventCtor, EventHandler<AnyEventCtor>[]>()
+
+    subscribeEvent<E extends AnyEventCtor>(event: E, handler: EventHandler<E>): () => void {
         let eventSubscribers = this.eventSubscribers.get(event)
         if (!eventSubscribers) {
             eventSubscribers = []
@@ -644,95 +1745,103 @@ export class Store<Root> {
         }
     }
 
-    runQuery<Args extends Serializable[], Return>(query: Query<Args, Return, Root>, ...args: Args): Return {
-        const queryStorage = getOrCreateQueryStorage(query, args)
-
-        if (queryStorage.current) {
-            return queryStorage.current.return as Return
+    runQuery<Return = unknown>(gen: QueryRun<Return>): Return {
+        const store = this
+        const meta = genToMeta.get(gen as Generator<GenRequest, unknown, unknown>)
+        if (!meta) {
+            throw new Error('[koka-domain] runQuery: generator not registered')
         }
+        const queryRef = (meta.domain as any)[meta.methodName] as AnyQuery
+        const queryStorage = QueryStorage.getOrCreate(meta.domain, queryRef, meta.args, meta.cacheKey)
 
-        /** Re-record dependencies: disconnect from old upstreams, clear deps; the query run below will re-populate via getResult/query(). */
+        if (queryStorage.result !== undefined && queryStorage.version === store.version) {
+            if (queryStorage.result.type === 'err') {
+                throw queryStorage.result.error
+            }
+            return queryStorage.result.value
+        }
+        if (queryStorage.result !== undefined) {
+            queryStorage.result = undefined
+            queryStorage.version = undefined
+            for (const domainStorage of queryStorage.domainDeps.values()) {
+                domainStorage.clearResult()
+            }
+        }
         for (const domainStorage of queryStorage.domainDeps.values()) {
-            domainStorage.usedBy.delete(queryStorage.key)
+            domainStorage.usedByQueries.delete(queryStorage.key)
         }
-
         for (const queryDepStorage of queryStorage.queryDeps.values()) {
-            queryDepStorage.usedBy.delete(queryStorage.key)
+            queryDepStorage.usedByQueries.delete(queryStorage.key)
         }
-
         queryStorage.domainDeps.clear()
         queryStorage.queryDeps.clear()
 
-        const queryContext: QueryContext<Root> = {
-            get: (domain) => {
-                const result = queryContext.getResult(domain)
-                if (result.type === 'err') {
-                    throw result.error
-                }
-                return result.value
-            },
-            getResult: (domain) => {
-                const domainStorage = getOrCreateDomainStorage(domain)
-
-                queryStorage.domainDeps.set(domainStorage.domain.key, domainStorage)
-                domainStorage.usedBy.set(queryStorage.key, queryStorage)
-
-                return getDomainResult(domain)
-            },
-            query: (query, ...args) => {
-                const targetQueryStorage = getOrCreateQueryStorage(query, args)
-
-                queryStorage.queryDeps.set(targetQueryStorage.key, targetQueryStorage)
-                targetQueryStorage.usedBy.set(queryStorage.key, queryStorage)
-
-                if (targetQueryStorage.current) {
-                    return targetQueryStorage.current.return as ReturnType<typeof query>
-                }
-
-                return this.runQuery(query, ...args)
-            },
+        runGenerator(store, gen, queryStorage)
+        const res = queryStorage.result as Result<Return> | undefined
+        if (res === undefined) {
+            return undefined as Return
         }
-
-        const result = query(queryContext, ...args)
-
-        queryStorage.current = {
-            version: this.version,
-            return: result,
+        if (res.type === 'ok') {
+            return res.value as Return
         }
-
-        return result
+        throw res.error
     }
 
-    subscribeQuery<Args extends Serializable[], Return>(
-        query: Query<Args, Return, Root>,
-        ...args: Args
-    ): (subscriber: (value: Return) => unknown) => () => void {
-        const queryStorage = getOrCreateQueryStorage(query, args)
+    getQueryResult<Return = unknown>(gen: QueryRun<Return>): Result<Return> {
+        const meta = genToMeta.get(gen as Generator<GenRequest, unknown, unknown>)
+        if (!meta) {
+            throw new Error('[koka-domain] getQueryResult: generator not registered')
+        }
+        const queryRef = (meta.domain as any)[meta.methodName] as AnyQuery
+        const queryStorage = QueryStorage.getOrCreate(meta.domain, queryRef, meta.args, meta.cacheKey)
+        if (queryStorage.result !== undefined && queryStorage.version === this.version) {
+            return queryStorage.result as Result<Return>
+        }
+        try {
+            this.runQuery(gen)
+            return queryStorage.result as Result<Return>
+        } catch (error) {
+            const message = error instanceof Error ? error.message : String(error)
+            return Accessor.err(message) as Result<Return>
+        }
+    }
+
+    subscribeQuery<Return = unknown>(gen: QueryRun<Return>): (subscriber: (value: Return) => unknown) => () => void {
+        const meta = genToMeta.get(gen as Generator<GenRequest, unknown, unknown>)
+        if (!meta) {
+            throw new Error('[koka-domain] subscribeQuery: generator not registered')
+        }
+        const queryRef = (meta.domain as any)[meta.methodName] as AnyQuery
+        const queryStorage = QueryStorage.getOrCreate(meta.domain, queryRef, meta.args, meta.cacheKey)
+        const store = this
 
         return (subscriber: (value: Return) => unknown) => {
+            if (queryStorage.subscribers.size === 0) {
+                store.refDomainAndAncestors(meta.domain)
+                try {
+                    store.runQuery(gen)
+                } catch (_) {
+                    // ignore
+                }
+            }
             queryStorage.subscribers.add(subscriber as (value: unknown) => unknown)
 
             return () => {
                 queryStorage.subscribers.delete(subscriber as (value: unknown) => unknown)
+                if (queryStorage.subscribers.size === 0) {
+                    store.unrefDomainAndAncestors(meta.domain)
+                }
             }
         }
     }
 
-    runCommand<Args extends Serializable[], Return>(command: Command<Args, Return, Root>, ...args: Args): Return {
-        const commandContext: CommandContext<Root> = {
-            get: (domain) => {
-                const result = commandContext.getResult(domain)
-                if (result.type === 'err') {
-                    throw result.error
-                }
-                return result.value
-            },
-            getResult: (domain) => this.get(domain),
-            set: (domain, setStateInput) => this.set(domain, setStateInput),
-            query: (query, ...queryArgs) => this.runQuery(query, ...queryArgs),
-            emit: (event) => this.emitEvent(event),
+    runCommand<Return = unknown>(gen: Generator<CommandRequest, Return, unknown>): Return {
+        const meta = genToMeta.get(gen as Generator<GenRequest, unknown, unknown>)
+        if (!meta) {
+            throw new Error('[koka-domain] runCommand: generator not registered')
         }
-        return command(commandContext, ...args)
+        const result = runGenerator(this, gen as Generator<GenRequest, unknown, unknown>, null)
+        return result as Return
     }
 
     emitEvent<E extends AnyEvent>(event: E): void {
@@ -740,94 +1849,65 @@ export class Store<Root> {
         if (!eventSubscribers) {
             return
         }
-
-        const eventContext: EventContext<Root> = {
-            get: (domain) => {
-                const result = eventContext.getResult(domain)
-                if (result.type === 'err') {
-                    throw result.error
-                }
-                return result.value
-            },
-            getResult: (domain) => {
-                return this.get(domain)
-            },
-            set: (domain, setStateInput) => {
-                return this.set(domain, setStateInput)
-            },
-            emit: (event) => {
-                this.emitEvent(event)
-            },
-        }
-
+        const payload = event.payload
         for (const handler of eventSubscribers) {
-            handler(eventContext, event)
+            runGenerator(this, handler(payload), null)
         }
     }
 
-    getDomainFromCache<StateType>(
-        Ctor: typeof Domain<any, Root>,
-        path: DomainPath,
-    ): Domain<StateType, Root> | undefined {
-        const key = getDomainCacheKey(Ctor, path)
+    getDomainFromCache<StateType>(Ctor: DomainCtor<any, Root>, path: DomainPath): Domain<StateType, Root> | undefined {
+        const key = getDomainCacheKey(Ctor as typeof Domain<any, Root>, path)
         const domain = this.domainCache.get(key)
-
         return domain
     }
 
     setDomainInCache<StateType>(domain: Domain<StateType, Root>, path: DomainPath): boolean {
-        const result = domain.accessor.get(this.getState())
-
-        if (result.type === 'err') {
-            return false
-        }
-
-        const key = getDomainCacheKey(domain.constructor as typeof Domain<StateType, Root>, path)
+        const key = getDomainCacheKey(domain.constructor as typeof Domain<any, Root>, path)
         this.domainCache.set(key, domain)
-
         return true
     }
 
     removeDomainFromCache<StateType>(domain: Domain<StateType, Root>, path: DomainPath): boolean {
-        const key = getDomainCacheKey(domain.constructor as typeof Domain<StateType, Root>, path)
-        return this.domainCache.delete(key)
+        const key = getDomainCacheKey(domain.constructor as typeof Domain<any, Root>, path)
+        const deleted = this.domainCache.delete(key)
+        if (deleted) {
+            for (const parent of Domain.getParentDomains(domain)) {
+                parent.removeDerivedFromCache(key)
+            }
+            DomainStorage.getOrCreate(domain).clearResult()
+        }
+        return deleted
     }
 
-    /** Resolve a domain by path (any Ctor) for building the domain tree. */
+    removeDomainAndSubtree(domain: Domain<any, Root>): void {
+        const path = domain.path
+        for (const child of domain.getCachedDerivedDomains()) {
+            this.removeDomainAndSubtree(child)
+        }
+        this.removeDomainFromCache(domain, path)
+    }
+
     getDomainByPath(path: DomainPath): Domain<any, Root> | undefined {
-        if (path.type === 'root') return this.domain
+        if (path.type === 'root') {
+            return this.domain
+        }
         const pathKey = getKeyFromPath(path)
         for (const domain of this.domainCache.values()) {
-            if (getKeyFromPath(domain.path) === pathKey) return domain
+            if (getKeyFromPath(domain.path) === pathKey) {
+                return domain
+            }
         }
         return undefined
     }
 
-    /** Root domain storage for top-down diff; created on demand. */
     getRootDomainStorage(): DomainStorage {
-        return getOrCreateDomainStorage(this.domain)
+        return DomainStorage.getOrCreate(this.domain)
     }
 }
 
-export type EventContext<Root = any> = {
-    get: <State>(domain: Domain<State, Root>) => State
-    getResult: <State>(domain: Domain<State, Root>) => Result<State>
-    set: <State>(domain: Domain<State, Root>, setStateInput: SetStateInput<State>) => Result<Root>
-    emit: <E extends AnyEvent>(event: E) => void
-}
-
-export type EventInput<E extends AnyEvent, D extends AnyDomain> = {
-    domain: D
-    event: E
-}
-
-export interface Event<Name extends string, T> {
-    type: 'event'
-    name: Name
-    payload: T
-}
-
-export type AnyEvent = Event<string, any>
+// ---------------------------------------------------------------------------
+// Event class factory & event decorator
+// ---------------------------------------------------------------------------
 
 export function Event<const Name extends string>(name: Name) {
     return class EventClass<T = void> implements Event<Name, T> {
@@ -840,326 +1920,101 @@ export function Event<const Name extends string>(name: Name) {
     }
 }
 
-type EventCtor<Name extends string, T> = new (...args: any[]) => Event<Name, T>
-
-type AnyEventCtor = EventCtor<string, any>
-
-export type EventValue<E extends AnyEvent> = E['payload']
-
-export type EventHandler<E extends AnyEventCtor, Root = any> = (
-    context: EventContext<Root>,
-    event: EventValue<InstanceType<E>>,
-) => void
-
-const eventHandlersStorages = new WeakMap<AnyDomain, Map<AnyEventCtor, Array<EventHandler<AnyEventCtor>>>>()
-
-export function event<ES extends AnyEventCtor[]>(...Events: ES) {
-    return function <This extends AnyDomain, Return, Root = any>(
-        target: (this: This, event: InstanceType<ES[number]>, context: EventContext<Root>) => unknown,
+export function event<ES extends AnyEventCtor[], Request extends EventRequest>(...Events: ES) {
+    return function <This>(
+        target: (this: This, event: EventValue<InstanceType<ES[number]>>) => Generator<Request, void, unknown>,
         context: KokaClassMethodDecoratorContext<This, typeof target>,
     ): typeof target {
-        context.addInitializer(function () {
+        context.addInitializer(function (this: This) {
             if (!(this instanceof Domain)) {
                 throw new Error('Event must be used on a Domain class')
             }
-
-            let eventHandlersStorage = eventHandlersStorages.get(this)
-
-            if (!eventHandlersStorage) {
-                eventHandlersStorage = new Map()
-                eventHandlersStorages.set(this, eventHandlersStorage)
-            }
-
+            const store = (this as AnyDomain).store
+            const domain = this as AnyDomain
             for (const EventCtor of Events) {
-                let eventHandlers = eventHandlersStorage.get(EventCtor)
-
-                if (!eventHandlers) {
-                    eventHandlers = []
-                    eventHandlersStorage.set(EventCtor, eventHandlers)
+                const handler = (payload: EventValue<InstanceType<typeof EventCtor>>) => {
+                    const gen = (
+                        target as (
+                            this: AnyDomain,
+                            event: EventValue<InstanceType<typeof EventCtor>>,
+                        ) => Generator<Request, void, unknown>
+                    ).call(domain, payload)
+                    registerGen(gen as Generator<GenRequest, unknown, unknown>, {
+                        domain,
+                        methodName: context.name,
+                        args: [payload] as Serializable[],
+                    })
+                    return gen
                 }
-
-                eventHandlers.push(target as EventHandler<typeof EventCtor, Root>)
+                store.subscribeEvent(EventCtor, handler as EventHandler<typeof EventCtor>)
             }
         })
 
         return target
     }
-}
-
-export type SetStateInput<S> = S | Accessor.Updater<S> | ((state: S) => S)
-
-export type StoreCtor<S extends AnyStore = AnyStore> =
-    | (abstract new <Root>(options: StoreOptions<Root>) => S)
-    | (new <Root>(options: StoreOptions<Root>) => S)
-
-type KokaClassMethodDecoratorContext<
-    This = unknown,
-    Value extends (this: This, ...args: any) => any = (this: This, ...args: any) => any,
-> = ClassMethodDecoratorContext<This, Value> & {
-    /**
-     * The name of the method should be a string.
-     */
-    name: string
-    /**
-     * The static property should be false, which means that the method is an instance method.
-     */
-    static: false
-}
-
-export type QueryContext<Root = any> = {
-    get: <State>(domain: Domain<State, Root>) => State
-    getResult: <State>(domain: Domain<State, Root>) => Result<State>
-
-    query: <Args extends Serializable[], Return>(query: Query<Args, Return, Root>, ...args: Args) => Return
-}
-
-export type Query<Args extends Serializable[], Return, Root = any> = {
-    (context: QueryContext<Root>, ...args: Args): Return
-    domain: AnyDomain
-    methodName: string
-}
-
-export type AnyQuery = Query<any, any, any>
-
-type DomainStorage = {
-    domain: AnyDomain
-    result?: Result<any>
-    queryStorages: Map<string, QueryStorage>
-    usedBy: Map<string, QueryStorage>
-    /** Child domain storages in the path tree (select/match/find/optional/object/union). Used for top-down diff with prune. */
-    children: Set<DomainStorage>
-}
-
-type QueryStorage = {
-    query: AnyQuery
-    key: string
-    args: Serializable[]
-    domainDeps: Map<string, DomainStorage>
-    queryDeps: Map<string, QueryStorage>
-    usedBy: Map<string, QueryStorage>
-    subscribers: Set<(value: unknown) => unknown>
-    current?: {
-        version: number
-        return: unknown
-    }
-}
-
-/** Topological order: dependencies before dependents (so re-run order is safe). */
-function topologicalSortQueryStorages(storages: Set<QueryStorage>): QueryStorage[] {
-    const result: QueryStorage[] = []
-    const visited = new Set<QueryStorage>()
-    const visiting = new Set<QueryStorage>()
-
-    function visit(qs: QueryStorage) {
-        if (visited.has(qs)) return
-        if (visiting.has(qs)) return
-        visiting.add(qs)
-        for (const dep of qs.queryDeps.values()) {
-            if (storages.has(dep)) visit(dep)
-        }
-        visiting.delete(qs)
-        visited.add(qs)
-        result.push(qs)
-    }
-
-    for (const qs of storages) {
-        visit(qs)
-    }
-    return result
-}
-
-const checkQueryStorageDeps = (queryStorage: QueryStorage) => {
-    for (const domainStorage of queryStorage.domainDeps.values()) {
-        if (!domainStorage.result) {
-            return false
-        }
-
-        const currentResult = domainStorage.domain.store.get(domainStorage.domain)
-
-        if (!shallowEqualResult(currentResult, domainStorage.result)) {
-            return false
-        }
-    }
-
-    for (const queryDepStorage of queryStorage.queryDeps.values()) {
-        const isDirty = checkQueryStorageDeps(queryDepStorage)
-
-        if (!isDirty) {
-            return false
-        }
-    }
-
-    return true
-}
-
-/** Parent path(s) in the domain path tree; used to attach this domain storage to parent(s) for top-down traverse. */
-function getParentPaths(path: DomainPath): DomainPath[] {
-    switch (path.type) {
-        case 'root':
-            return []
-        case 'select':
-        case 'match':
-        case 'find':
-            return [path.prev]
-        case 'optional':
-            return [path.inner]
-        case 'object':
-            return Object.values(path.shape)
-        case 'union':
-            return path.variants
-        default:
-            path satisfies never
-            return []
-    }
-}
-
-const domainStorages = new WeakMap<AnyDomain, DomainStorage>()
-
-function getOrCreateDomainStorage(domain: AnyDomain): DomainStorage {
-    let domainStorage = domainStorages.get(domain)
-    if (!domainStorage) {
-        domainStorage = {
-            domain,
-            queryStorages: new Map(),
-            usedBy: new Map(),
-            children: new Set(),
-        }
-        domainStorages.set(domain, domainStorage)
-        for (const parentPath of getParentPaths(domain.path)) {
-            const parentDomain = domain.store.getDomainByPath(parentPath)
-            if (parentDomain) {
-                getOrCreateDomainStorage(parentDomain).children.add(domainStorage)
-            }
-        }
-    }
-    return domainStorage
-}
-
-function getOrCreateQueryStorage(query: AnyQuery, args: Serializable[]): QueryStorage {
-    const domainStorage = getOrCreateDomainStorage(query.domain)
-    const queryKey = `${query.methodName}(${JSON.stringify(args)})`
-
-    let queryStorage = domainStorage.queryStorages.get(queryKey)
-
-    if (!queryStorage) {
-        queryStorage = {
-            query,
-            key: queryKey,
-            args,
-            domainDeps: new Map(),
-            queryDeps: new Map(),
-            usedBy: new Map(),
-            subscribers: new Set(),
-        }
-
-        domainStorage.queryStorages.set(queryKey, queryStorage)
-    }
-
-    return queryStorage
 }
 
 export function query() {
-    return function <This extends AnyDomain, Return, Args extends Serializable[], Root = any>(
-        target: (this: This, context: QueryContext<Root>, ...args: Args) => unknown,
+    return function <This, Request extends QueryRequest, Return, Args extends Serializable[], Root = any>(
+        target: (this: This, ...args: Args) => Generator<Request, Return, unknown>,
         context: KokaClassMethodDecoratorContext<This, typeof target>,
     ): typeof target {
         const methodName = context.name
-
-        context.addInitializer(function () {
-            // @ts-ignore
-            this[methodName] = this[methodName].bind(this)
-
-            // @ts-ignore
-            this[methodName].domain = this
-            // @ts-ignore
-            this[methodName].methodName = methodName
+        function wrapper(this: any, ...args: Args) {
+            const argsSer = args as Serializable[]
+            const cacheKey = `${methodName}(${JSON.stringify(argsSer)})`
+            const gen = target.call(this, ...args) as Generator<Request, unknown, unknown>
+            registerGen(gen as Generator<GenRequest, unknown, unknown>, {
+                domain: this as AnyDomain,
+                methodName,
+                args: argsSer,
+                cacheKey,
+            })
+            return gen
+        }
+        context.addInitializer(function (this: This) {
+            ;(this as any)[methodName] = wrapper.bind(this)
+            const bound = (this as any)[methodName]
+            bound.domain = this
+            bound.methodName = methodName
         })
-
-        return target
+        return wrapper as typeof target
     }
 }
-
-function getDomainResult<State, Root = any>(domain: Domain<State, Root>): Result<State> {
-    const domainStorage = getOrCreateDomainStorage(domain)
-
-    if (!domainStorage.result) {
-        domainStorage.result = domain.store.get(domain)
-
-        return domainStorage.result
-    }
-
-    return domainStorage.result
-}
-
-function getDomainState<State, Root = any>(domain: Domain<State, Root>): State {
-    const result = getDomainResult(domain)
-    if (result.type === 'err') {
-        throw result.error
-    }
-    return result.value
-}
-
-export type CommandContext<Root = any> = {
-    get: <State>(domain: Domain<State, Root>) => State
-    getResult: <State>(domain: Domain<State, Root>) => Result<State>
-    set: <State>(domain: Domain<State, Root>, setStateInput: SetStateInput<State>) => Result<Root>
-    query: <Args extends Serializable[], Return>(query: Query<Args, Return, Root>, ...args: Args) => Return
-    emit: <E extends AnyEvent>(event: E) => void
-}
-
-export type Command<Args extends Serializable[], Return, Root = any> = {
-    (context: CommandContext<Root>, ...args: Args): Return
-    domain: AnyDomain
-    methodName: string
-}
-
-export type AnyCommand = Command<any, any, any>
 
 export function command() {
-    return function <This extends AnyDomain, Args extends Serializable[], Return, Root = any>(
-        target: (this: This, context: CommandContext<Root>, ...args: Args) => Return,
+    return function <This, Args extends Serializable[], Request extends CommandRequest, Return, Root = any>(
+        target: (this: This, ...args: Args) => Generator<Request, Return, unknown>,
         context: KokaClassMethodDecoratorContext<This, typeof target>,
     ): typeof target {
         const methodName = context.name
-
-        context.addInitializer(function () {
+        function wrapper(this: any, ...args: Args) {
+            const gen = target.call(this, ...args) as Generator<Request, unknown, unknown>
+            registerGen(gen as Generator<GenRequest, unknown, unknown>, {
+                domain: this as AnyDomain,
+                methodName,
+                args: args as Serializable[],
+            })
+            return gen
+        }
+        context.addInitializer(function (this: This) {
             if (!(this instanceof Domain)) {
                 throw new Error('Command must be used on a Domain class')
             }
-
-            // @ts-ignore
-            this[methodName] = this[methodName].bind(this)
-            // @ts-ignore
-            this[methodName].domain = this
-            // @ts-ignore
-            this[methodName].methodName = methodName
+            ;(this as any)[methodName] = wrapper.bind(this)
+            const bound = (this as any)[methodName]
+            bound.domain = this
+            bound.methodName = methodName
         })
-
-        return target
+        return wrapper as typeof target
     }
 }
 
-type EffectContext = {
-    abortSignal: AbortSignal
-    abortController: AbortController
-}
-
-type EffectMethod = (effectContext: EffectContext) => unknown
-
-const effectMethodsStorage = new WeakMap<new (...args: any[]) => any, Map<string, EffectMethod>>()
-
-const getEffectfulMethods = (domain: AnyDomain): Map<string, EffectMethod> | undefined => {
-    let methods = effectMethodsStorage.get(domain.constructor as new (...args: any[]) => any)
-    return methods
-}
-
-function effect() {
-    return function <This, Value extends EffectMethod>(
-        target: Value,
-        context: ClassMethodDecoratorContext<This, Value> & {
-            static: false
-        },
-    ): Value {
+export function effect() {
+    return function <This, Args extends [] | [ctx: EffectContext], Request extends EffectRequest>(
+        target: EffectMethod<This, Args, Request>,
+        context: KokaClassMethodDecoratorContext<This, typeof target>,
+    ): typeof target {
         const methodName = String(context.name)
 
         context.addInitializer(function (this: This) {
@@ -1171,19 +2026,25 @@ function effect() {
                 effectMethodsStorage.set(DomainCtor, methods)
             }
 
-            methods.set(methodName, target as EffectMethod)
+            methods.set(methodName, target as EffectMethod<This, Args, Request>)
         })
 
         return target
     }
 }
 
-/** Get state at domain (capability-passing: use store.get directly or pass context in query/command). */
-export function getState<State, Root>(domain: Domain<State, Root>): Result<State> {
-    return domain.store.get(domain)
+export function getDomainState<State, Root = any>(domain: Domain<State, Root>): State {
+    const result = DomainStorage.getDomainResult(domain)
+    if (result.type === 'err') {
+        throw result.error
+    }
+    return result.value
 }
 
-/** Set state at domain (capability-passing: use store.set directly or pass context in command). */
+export function getState<State, Root>(domain: Domain<State, Root>): Result<State> {
+    return DomainStorage.getDomainResult(domain)
+}
+
 export function setState<State, Root>(domain: Domain<State, Root>, setStateInput: SetStateInput<State>): Result<Root> {
     return domain.store.set(domain, setStateInput)
 }
@@ -1192,18 +2053,7 @@ export function subscribeDomainResult<State, Root>(
     domain: Domain<State, Root>,
     listener: (result: Result<State>) => unknown,
 ): () => void {
-    let previousResult: Result<State> | undefined
-
-    return domain.store.subscribeState(() => {
-        const result = getState(domain)
-
-        if (previousResult !== undefined && shallowEqualResult(result, previousResult)) {
-            return
-        }
-
-        previousResult = result
-        listener(result)
-    })
+    return domain.store.subscribeToDomain(domain, listener)
 }
 
 export function subscribeDomainState<State, Root>(
@@ -1216,4 +2066,62 @@ export function subscribeDomainState<State, Root>(
         }
         listener(result.value)
     })
+}
+
+export function subscribeQueryState<Return = unknown>(
+    gen: QueryRun<Return>,
+    subscriber: (value: Return) => unknown,
+): () => void {
+    const meta = genToMeta.get(gen)
+    if (!meta) {
+        throw new Error('[koka-domain] subscribeQueryState: generator not registered')
+    }
+    return meta.domain.store.subscribeQuery(gen)(subscriber as (value: unknown) => unknown)
+}
+
+export function subscribeQueryResult<Return = unknown>(
+    gen: QueryRun<Return>,
+    subscriber: (result: Result<Return>) => unknown,
+): () => void {
+    const meta = genToMeta.get(gen)
+    if (!meta) {
+        throw new Error('[koka-domain] subscribeQueryResult: generator not registered')
+    }
+    return meta.domain.store.subscribeQuery(gen)(((value: unknown) => {
+        subscriber(Accessor.ok(value) as Result<Return>)
+    }) as (value: unknown) => unknown)
+}
+
+export function getQueryResult<Return = unknown>(gen: QueryRun<Return>): Result<Return> {
+    const meta = genToMeta.get(gen)
+    if (!meta) {
+        throw new Error('[koka-domain] getQueryResult: generator not registered')
+    }
+    return meta.domain.store.getQueryResult(gen)
+}
+
+export function getQueryState<Return = unknown>(gen: QueryRun<Return>): Return {
+    const result = getQueryResult(gen)
+    if (result.type === 'err') {
+        throw result.error
+    }
+    return result.value
+}
+
+/** Run a bound query generator (defensive: throws if generator is not registered). */
+export function runQuery<Return = unknown>(gen: QueryRun<Return>): Return {
+    const meta = genToMeta.get(gen as Generator<GenRequest, unknown, unknown>)
+    if (!meta) {
+        throw new Error('[koka-domain] runQuery: generator not registered (bound generator required)')
+    }
+    return meta.domain.store.runQuery(gen) as Return
+}
+
+/** Run a bound command generator (defensive: throws if generator is not registered). */
+export function runCommand<Return = unknown>(gen: Generator<CommandRequest, Return, unknown>): Return {
+    const meta = genToMeta.get(gen as Generator<GenRequest, unknown, unknown>)
+    if (!meta) {
+        throw new Error('[koka-domain] runCommand: generator not registered (bound generator required)')
+    }
+    return meta.domain.store.runCommand(gen) as Return
 }

@@ -1,11 +1,27 @@
-import { StrictMode, useState } from 'react'
+import { StrictMode, useState, useEffect } from 'react'
 import { createRoot } from 'react-dom/client'
-import * as Domain from 'koka-domain'
-import { PrettyLogger } from 'koka-domain/pretty-browser-logger'
+import { Domain, Store } from 'koka-domain'
 import { useDomainState } from 'koka-react'
-import { type TodoApp, TodoAppDomain } from './domain'
+import { type Todo, type TodoApp, TodoAppDomain, TODOS_STORAGE_KEY } from './domain'
 import './index.css'
 import App from './App.tsx'
+
+const TAB_MODE_STORAGE_KEY = 'koka-demo-tab-mode'
+type TabMode = 'todo-app' | 'todo-app-list'
+
+function loadTabMode(): TabMode {
+    try {
+        const raw = localStorage.getItem(TAB_MODE_STORAGE_KEY)
+        if (raw === 'todo-app' || raw === 'todo-app-list') return raw
+    } catch {}
+    return 'todo-app'
+}
+
+function saveTabMode(mode: TabMode) {
+    try {
+        localStorage.setItem(TAB_MODE_STORAGE_KEY, mode)
+    } catch {}
+}
 
 type AppState = {
     todoApp: TodoApp
@@ -13,12 +29,16 @@ type AppState = {
 }
 
 type MainProps = {
-    domain: Domain.Domain<AppState, AppState>
+    domain: Domain<AppState, AppState>
 }
 
 function Main(props: MainProps) {
-    const count = useDomainState(props.domain.select((app) => app.todoAppList.length))
-    const [mode, setMode] = useState<'todo-app' | 'todo-app-list'>('todo-app')
+    const count = useDomainState(props.domain.select('todoAppList').select('length'))
+    const [mode, setMode] = useState<TabMode>(loadTabMode)
+
+    useEffect(() => {
+        saveTabMode(mode)
+    }, [mode])
 
     return (
         <div className="min-h-screen bg-linear-to-br from-slate-50 via-blue-50 to-indigo-100 p-6">
@@ -72,7 +92,8 @@ function Main(props: MainProps) {
                 {mode === 'todo-app-list' ? (
                     <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6 justify-items-center">
                         {Array.from({ length: count }).map((_, index) => {
-                            const todoApp$ = new TodoAppDomain(props.domain.select((app) => app.todoAppList[index]))
+                            const todoApp = props.domain.select('todoAppList').select(index).use(TodoAppDomain)
+                            todoApp.storageKey = `${TODOS_STORAGE_KEY}-${index}`
 
                             return (
                                 <div
@@ -83,7 +104,7 @@ function Main(props: MainProps) {
                                         <div className="absolute -top-2 -right-2 bg-linear-to-r from-purple-500 to-pink-500 text-white text-xs font-bold px-2 py-1 rounded-full shadow-lg">
                                             #{index + 1}
                                         </div>
-                                        <App todoApp$={todoApp$} />
+                                        <App todoApp={todoApp} />
                                     </div>
                                 </div>
                             )
@@ -92,7 +113,11 @@ function Main(props: MainProps) {
                 ) : (
                     <div className="flex justify-center">
                         <div className="transform transition-all duration-300 hover:scale-105 hover:shadow-2xl">
-                            <App todoApp$={new TodoAppDomain(props.domain.prop('todoApp'))} />
+                            {(() => {
+                                const todoApp = props.domain.select('todoApp').use(TodoAppDomain)
+                                todoApp.storageKey = TODOS_STORAGE_KEY
+                                return <App todoApp={todoApp} />
+                            })()}
                         </div>
                     </div>
                 )}
@@ -112,85 +137,109 @@ function Main(props: MainProps) {
     )
 }
 
-const initialState: AppState = {
-    todoApp: {
+function loadTodosFromStorageKey(key: string): Todo[] | null {
+    try {
+        const raw = localStorage.getItem(key)
+        if (!raw) return null
+        const parsed = JSON.parse(raw) as Todo[]
+        if (!Array.isArray(parsed)) return null
+        return parsed.map((t) => ({ ...t, animation: t.animation }))
+    } catch {
+        return null
+    }
+}
+
+const defaultSingleTodos: Todo[] = [
+    { id: 101, text: 'Learn koka-domain framework', done: true },
+    { id: 102, text: 'Build React todo app', done: true },
+    { id: 103, text: 'Write comprehensive documentation', done: false },
+    { id: 104, text: 'Add unit tests', done: false },
+    { id: 105, text: 'Optimize performance', done: false },
+    { id: 106, text: 'Deploy to production', done: false },
+]
+
+const defaultTodoAppList: TodoApp[] = [
+    {
         todos: [
-            { id: 101, text: 'Learn koka-domain framework', done: true },
-            { id: 102, text: 'Build React todo app', done: true },
-            { id: 103, text: 'Write comprehensive documentation', done: false },
-            { id: 104, text: 'Add unit tests', done: false },
-            { id: 105, text: 'Optimize performance', done: false },
-            { id: 106, text: 'Deploy to production', done: false },
+            { id: 1001, text: 'Learn koka-domain framework', done: true },
+            { id: 1002, text: 'Build React todo app', done: true },
+            { id: 1003, text: 'Write comprehensive documentation', done: false },
+            { id: 1004, text: 'Add unit tests', done: false },
+            { id: 1005, text: 'Optimize performance', done: false },
+            { id: 1006, text: 'Deploy to production', done: false },
         ],
         input: '',
         filter: 'all',
+        lastSavedAt: null,
     },
-    todoAppList: [
-        {
-            todos: [
-                { id: 101, text: 'Learn koka-domain framework', done: true },
-                { id: 102, text: 'Build React todo app', done: true },
-                { id: 103, text: 'Write comprehensive documentation', done: false },
-                { id: 104, text: 'Add unit tests', done: false },
-                { id: 105, text: 'Optimize performance', done: false },
-                { id: 106, text: 'Deploy to production', done: false },
-            ],
-            input: '',
-            filter: 'all',
-        },
-        {
-            todos: [
-                { id: 201, text: 'Buy groceries', done: false },
-                { id: 202, text: 'Cook dinner', done: false },
-                { id: 203, text: 'Clean the house', done: true },
-                { id: 204, text: 'Do laundry', done: false },
-                { id: 205, text: 'Take out trash', done: true },
-            ],
-            input: '',
-            filter: 'undone',
-        },
-        {
-            todos: [
-                { id: 301, text: 'Read "Clean Code" book', done: true },
-                { id: 302, text: 'Practice coding challenges', done: false },
-                { id: 303, text: 'Learn TypeScript advanced features', done: false },
-                { id: 304, text: 'Study design patterns', done: true },
-                { id: 305, text: 'Contribute to open source', done: false },
-                { id: 306, text: 'Attend tech meetup', done: false },
-                { id: 307, text: 'Update portfolio', done: true },
-            ],
-            input: '',
-            filter: 'done',
-        },
-        {
-            todos: [
-                { id: 401, text: 'Morning workout', done: true },
-                { id: 402, text: 'Meditation session', done: false },
-                { id: 403, text: 'Drink 8 glasses of water', done: false },
-                { id: 404, text: 'Take vitamins', done: true },
-                { id: 405, text: 'Go for a walk', done: false },
-                { id: 406, text: 'Get 8 hours of sleep', done: false },
-            ],
-            input: '',
-            filter: 'all',
-        },
-        {
-            todos: [
-                { id: 501, text: 'Plan weekend trip', done: false },
-                { id: 502, text: 'Book flight tickets', done: false },
-                { id: 503, text: 'Reserve hotel room', done: false },
-                { id: 504, text: 'Create travel itinerary', done: false },
-                { id: 505, text: 'Pack luggage', done: false },
-            ],
-            input: '',
-            filter: 'all',
-        },
-    ],
+    {
+        todos: [
+            { id: 2001, text: 'Buy groceries', done: false },
+            { id: 2002, text: 'Cook dinner', done: false },
+            { id: 2003, text: 'Clean the house', done: true },
+            { id: 2004, text: 'Do laundry', done: false },
+            { id: 2005, text: 'Take out trash', done: true },
+        ],
+        input: '',
+        filter: 'undone',
+        lastSavedAt: null,
+    },
+    {
+        todos: [
+            { id: 3001, text: 'Read "Clean Code" book', done: true },
+            { id: 3002, text: 'Practice coding challenges', done: false },
+            { id: 3003, text: 'Learn TypeScript advanced features', done: false },
+            { id: 3004, text: 'Study design patterns', done: true },
+            { id: 3005, text: 'Contribute to open source', done: false },
+            { id: 3006, text: 'Attend tech meetup', done: false },
+            { id: 3007, text: 'Update portfolio', done: true },
+        ],
+        input: '',
+        filter: 'done',
+        lastSavedAt: null,
+    },
+    {
+        todos: [
+            { id: 4001, text: 'Morning workout', done: true },
+            { id: 4002, text: 'Meditation session', done: false },
+            { id: 4003, text: 'Drink 8 glasses of water', done: false },
+            { id: 4004, text: 'Take vitamins', done: true },
+            { id: 4005, text: 'Go for a walk', done: false },
+            { id: 4006, text: 'Get 8 hours of sleep', done: false },
+        ],
+        input: '',
+        filter: 'all',
+        lastSavedAt: null,
+    },
+    {
+        todos: [
+            { id: 5001, text: 'Plan weekend trip', done: false },
+            { id: 5002, text: 'Book flight tickets', done: false },
+            { id: 5003, text: 'Reserve hotel room', done: false },
+            { id: 5004, text: 'Create travel itinerary', done: false },
+            { id: 5005, text: 'Pack luggage', done: false },
+        ],
+        input: '',
+        filter: 'all',
+        lastSavedAt: null,
+    },
+]
+
+const initialState: AppState = {
+    todoApp: {
+        todos: loadTodosFromStorageKey(TODOS_STORAGE_KEY) ?? defaultSingleTodos,
+        input: '',
+        filter: 'all',
+        lastSavedAt: null,
+    },
+    todoAppList: defaultTodoAppList.map((item, index) => ({
+        ...item,
+        todos: loadTodosFromStorageKey(`${TODOS_STORAGE_KEY}-${index}`) ?? item.todos,
+    })),
 }
 
-const store = new Domain.Store<AppState>({
+const store = new Store<AppState>({
     state: initialState,
-    plugins: [PrettyLogger()],
 })
 
 createRoot(document.getElementById('root')!).render(

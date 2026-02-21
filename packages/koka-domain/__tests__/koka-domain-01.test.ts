@@ -1,9 +1,4 @@
-import * as Accessor from 'koka-accessor'
-import * as Async from 'koka/async'
-import * as Koka from 'koka'
-import * as Result from 'koka/result'
-import * as Err from 'koka/err'
-import { Domain, Store, get, set } from '../src/koka-domain.ts'
+import { Domain, Store, getState, command, get, set } from '../src/koka-domain.ts'
 
 type Todo = {
     id: number
@@ -17,11 +12,22 @@ type TodoApp = {
     input: string
 }
 
+class TodoInputErr {
+    readonly type = 'err' as const
+    readonly name = 'TodoInputErr' as const
+    error: string
+    constructor(error: string) {
+        this.error = error
+    }
+}
+
 class TextDomain<Root> extends Domain<string, Root> {
+    @command()
     *updateText(text: string) {
         yield* set(this, text)
         return 'text updated'
     }
+    @command()
     *clearText() {
         yield* set(this, '')
         return 'text cleared'
@@ -29,24 +35,26 @@ class TextDomain<Root> extends Domain<string, Root> {
 }
 
 class BoolDomain<Root> extends Domain<boolean, Root> {
+    @command()
     *toggle() {
-        yield* set(this, (value) => !value)
+        yield* set(this, (value: boolean) => !value)
         return 'bool toggled'
     }
 }
 
 class TodoDomain<Root> extends Domain<Todo, Root> {
-    text$ = this.use(TextDomain, this.state.prop('text')) as TextDomain<Root>
-    done$ = this.use(BoolDomain, this.state.prop('done')) as BoolDomain<Root>;
+    text$ = this.select('text').use(TextDomain)
+    done$ = this.select('done').use(BoolDomain);
 
+    @command()
     *updateTodoText(text: string) {
-        const done = yield* get(this.done$)
-        yield* this.text$.updateText(text)
+        yield* set(this.text$, text)
         return 'todo updated'
     }
 
+    @command()
     *toggleTodo() {
-        yield* this.done$.toggle()
+        yield* set(this.done$, (v: boolean) => !v)
         return 'todo toggled'
     }
 }
@@ -54,60 +62,36 @@ class TodoDomain<Root> extends Domain<Todo, Root> {
 let todoUid = 0
 
 class TodoListDomain<Root> extends Domain<Todo[], Root> {
+    @command()
     *addTodo(text: string) {
-        const newTodo = {
-            id: todoUid++,
-            text,
-            done: false,
-        }
-        yield* set(this, (todos) => [...todos, newTodo])
-
+        const newTodo = { id: todoUid++, text, done: false }
+        yield* set(this, (todos: Todo[]) => [...todos, newTodo])
         return 'todo added'
     }
 
     todo(id: number): TodoDomain<Root> {
-        return this.use(TodoDomain, this.state.findId('id', id))
+        return this.find('id', id).use(TodoDomain) as unknown as TodoDomain<Root>
     }
-
-    completedTodoList$ = this.use(
-        TodoListDomain,
-        this.state.filter((todo) => todo.done),
-    ) as TodoListDomain<Root>
-    activeTodoList$ = this.use(
-        TodoListDomain,
-        this.state.filter((todo) => !todo.done),
-    ) as TodoListDomain<Root>
-    activeTodoTextList$ = this.use(
-        Domain,
-        this.activeTodoList$.state.map((todo$) => (todo$ as Accessor.Accessor<Todo, Todo>).prop('text')),
-    ) as Domain<string[], Root>
-    completedTodoTextList$ = this.use(
-        Domain,
-        this.completedTodoList$.state.map((todo$) => (todo$ as Accessor.Accessor<Todo, Todo>).prop('text')),
-    ) as Domain<string[], Root>
 }
 
-class TodoInputErr extends Err.Err('TodoInputErr')<string> {}
-
 class TodoAppDomain<Root> extends Domain<TodoApp, Root> {
-    todos$ = this.use(TodoListDomain, this.state.prop('todos'))
-    input$ = this.use(TextDomain, this.state.prop('input'));
+    todos$ = this.select('todos').use(TodoListDomain)
+    input$ = this.select('input').use(TextDomain);
 
+    @command()
     *addTodo() {
-        const todoApp = yield* get(this)
-
-        if (todoApp.input === '') {
-            throw yield* Err.throw(new TodoInputErr('Input is empty'))
+        const app = yield* get(this)
+        if (app.input === '') {
+            return new TodoInputErr('Input is empty')
         }
-
-        yield* this.todos$.addTodo(todoApp.input)
-        yield* this.updateInput('')
-        return 'Todo added'
+        yield* this.todos$.addTodo(app.input)
+        yield* (this.input$ as any).clearText()
+        return { type: 'ok', value: 'Todo added' }
     }
 
+    @command()
     *updateInput(input: string) {
-        yield* Async.await(Promise.resolve('test async'))
-        yield* this.input$.updateText(input)
+        yield* set(this.input$, input)
         return 'Input updated'
     }
 }
@@ -116,42 +100,29 @@ describe('TodoAppStore', () => {
     let store: Store<TodoApp>
 
     beforeEach(() => {
-        const state: TodoApp = {
-            todos: [],
-            filter: 'all',
-            input: '',
-        }
-
-        store = new Store({
-            state,
+        todoUid = 0
+        store = new Store<TodoApp>({
+            state: {
+                todos: [],
+                filter: 'all',
+                input: '',
+            },
         })
     })
 
     it('should add a todo', async () => {
-        const todoAppDomain = new TodoAppDomain(store.domain)
-        const result: Promise<Result.Result<string, Err.AnyErr>> = Result.runAsync(todoAppDomain.addTodo())
+        const todoAppDomain = store.domain.use(TodoAppDomain) as TodoAppDomain<TodoApp>
 
-        expect(await result).toEqual({
-            type: 'err',
-            name: 'TodoInputErr',
-            error: 'Input is empty',
-        })
+        const result1 = store.runCommand((todoAppDomain as any).addTodo())
+        expect(result1).toMatchObject({ type: 'err', name: 'TodoInputErr', error: 'Input is empty' })
 
-        const result2: Promise<Result.Result<string, Err.AnyErr>> = Result.runAsync(todoAppDomain.updateInput('test'))
-        expect(await result2).toEqual({
-            type: 'ok',
-            value: 'Input updated',
-        })
+        const result2 = await store.runCommand((todoAppDomain as any).updateInput('test'))
+        expect(result2).toBe('Input updated')
 
-        const result3: Promise<Result.Result<string, Err.AnyErr>> = Result.runAsync(todoAppDomain.addTodo())
+        const result3 = store.runCommand((todoAppDomain as any).addTodo())
+        expect(result3).toEqual({ type: 'ok', value: 'Todo added' })
 
-        expect(await result3).toEqual({
-            type: 'ok',
-            value: 'Todo added',
-        })
-
-        const todos: Result.Result<Todo[], Accessor.AccessorErr> = Result.runSync(get(todoAppDomain.todos$))
-
+        const todos = getState(todoAppDomain.todos$)
         expect(todos).toEqual({
             type: 'ok',
             value: [

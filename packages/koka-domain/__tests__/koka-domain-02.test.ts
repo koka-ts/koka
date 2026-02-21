@@ -1,6 +1,4 @@
-import * as Err from 'koka/err'
-import * as Result from 'koka/result'
-import { Domain, Store, get, set } from '../src/koka-domain.ts'
+import { Domain, Store, command, query, get, set } from '../src/koka-domain.ts'
 
 type UserEntity = {
     id: string
@@ -27,86 +25,97 @@ type RootState = {
     products: Record<string, ProductEntity>
 }
 
-class DomainErr extends Err.Err('DomainErr')<string> {}
+type DomainErrResult = { type: 'err'; name: 'DomainErr'; error: string }
 
 class UserStorageDomain<Root extends RootState> extends Domain<Root['users'], Root> {
-    *getUser(id: string) {
+    @query()
+    *getUser(id: string): Generator<unknown, UserEntity | DomainErrResult, unknown> {
         const users = yield* get(this)
-        if (id in users) {
-            return users[id]
-        }
-
-        throw yield* Err.throw(new DomainErr(`User ${id} not found`))
+        if (id in users) return users[id]
+        return { type: 'err', name: 'DomainErr', error: `User ${id} not found` }
     }
-    *addUser(user: UserEntity) {
+
+    @command()
+    *addUser(user: UserEntity): Generator<unknown, void | DomainErrResult, unknown> {
         const users = yield* get(this)
         if (user.id in users) {
-            throw yield* Err.throw(new DomainErr(`User ${user.id} exists`))
+            return { type: 'err', name: 'DomainErr', error: `User ${user.id} exists` }
         }
-        yield* set(this, { ...users, [user.id]: user })
+        yield* set(this as Domain<Root['users'], Root>, { ...users, [user.id]: user })
     }
-    *addOrder(userId: string, orderId: string) {
-        const user = yield* this.getUser(userId)
-        yield* set(this, {
-            ...(yield* get(this)),
-            [userId]: {
-                ...user,
-                orderIds: [...user.orderIds, orderId],
-            },
+
+    @command()
+    *addOrder(userId: string, orderId: string): Generator<unknown, void | DomainErrResult, unknown> {
+        const userResult = (yield* (this as any).getUser(userId)) as UserEntity | DomainErrResult
+        if (typeof userResult === 'object' && 'type' in userResult && userResult.type === 'err') return userResult
+        const user = userResult as UserEntity
+        const users = yield* get(this)
+        yield* set(this as Domain<Root['users'], Root>, {
+            ...users,
+            [userId]: { ...user, orderIds: [...user.orderIds, orderId] },
         })
     }
 }
 
 class OrderStorageDomain<Root extends RootState> extends Domain<Root['orders'], Root> {
-    *getOrder(id: string) {
+    @query()
+    *getOrder(id: string): Generator<unknown, OrderEntity | DomainErrResult, unknown> {
         const orders = yield* get(this)
-        if (id in orders) {
-            return orders[id]
-        }
-        throw yield* Err.throw(new DomainErr(`Order ${id} not found`))
+        if (id in orders) return orders[id]
+        return { type: 'err', name: 'DomainErr', error: `Order ${id} not found` }
     }
-    *addOrder(order: OrderEntity) {
+
+    @command()
+    *addOrder(order: OrderEntity): Generator<unknown, void | DomainErrResult, unknown> {
         const orders = yield* get(this)
         if (order.id in orders) {
-            throw yield* Err.throw(new DomainErr(`Order ${order.id} exists`))
+            return { type: 'err', name: 'DomainErr', error: `Order ${order.id} exists` }
         }
-        yield* set(this, { ...orders, [order.id]: order })
+        yield* set(this as Domain<Root['orders'], Root>, { ...orders, [order.id]: order })
     }
-    *addProduct(orderId: string, productId: string) {
-        const order = yield* this.getOrder(orderId)
-        yield* set(this, {
-            ...(yield* get(this)),
-            [orderId]: {
-                ...order,
-                productIds: [...order.productIds, productId],
-            },
+
+    @command()
+    *addProduct(orderId: string, productId: string): Generator<unknown, void | DomainErrResult, unknown> {
+        const orderResult = (yield* (this as any).getOrder(orderId)) as OrderEntity | DomainErrResult
+        if (typeof orderResult === 'object' && 'type' in orderResult && orderResult.type === 'err') return orderResult
+        const order = orderResult as OrderEntity
+        const orders = yield* get(this)
+        yield* set(this as Domain<Root['orders'], Root>, {
+            ...orders,
+            [orderId]: { ...order, productIds: [...order.productIds, productId] },
         })
     }
 }
 
 class ProductStorageDomain<Root extends RootState> extends Domain<Root['products'], Root> {
-    *getProduct(id: string) {
+    @query()
+    *getProduct(id: string): Generator<unknown, ProductEntity | DomainErrResult, unknown> {
         const products = yield* get(this)
-        if (id in products) {
-            return products[id]
-        }
-        throw yield* Err.throw(new DomainErr(`Product ${id} not found`))
+        if (id in products) return products[id]
+        return { type: 'err', name: 'DomainErr', error: `Product ${id} not found` }
     }
-    *addProduct(product: ProductEntity) {
+
+    @command()
+    *addProduct(product: ProductEntity): Generator<unknown, void | DomainErrResult, unknown> {
         const products = yield* get(this)
         if (product.id in products) {
-            throw yield* Err.throw(new DomainErr(`Product ${product.id} exists`))
+            return { type: 'err', name: 'DomainErr', error: `Product ${product.id} exists` }
         }
-        yield* set(this, { ...products, [product.id]: product })
+        yield* set(this as Domain<Root['products'], Root>, { ...products, [product.id]: product })
     }
-    *getCollectors(productId: string) {
-        const product = yield* this.getProduct(productId)
-        const users = [] as UserEntity[]
+
+    @query()
+    *getCollectors(productId: string): Generator<unknown, UserEntity[] | DomainErrResult, unknown> {
+        const productResult = (yield* (this as any).getProduct(productId)) as ProductEntity | DomainErrResult
+        if (typeof productResult === 'object' && 'type' in productResult && productResult.type === 'err')
+            return productResult
+        const product = productResult as ProductEntity
+        const userStorage = this.store.domain.select('users').use(UserStorageDomain)
+        const users: UserEntity[] = []
         for (const collectorId of product.collectorIds) {
-            const user = yield* this.store.domain
-                .use(UserStorageDomain, this.store.domain.state.prop('users'))
-                .getUser(collectorId)
-            users.push(user)
+            const u = (yield* (userStorage as any).getUser(collectorId)) as UserEntity | DomainErrResult
+            if (typeof u === 'object' && 'type' in u && u.type === 'err') return u
+            users.push(u as UserEntity)
         }
         return users
     }
@@ -114,7 +123,6 @@ class ProductStorageDomain<Root extends RootState> extends Domain<Root['products
 
 describe('Graph Domain Operations', () => {
     let store: Store<RootState>
-
     let userStorage: UserStorageDomain<RootState>
     let orderStorage: OrderStorageDomain<RootState>
     let productStorage: ProductStorageDomain<RootState>
@@ -145,43 +153,56 @@ describe('Graph Domain Operations', () => {
             },
         }
         store = new Store<RootState>({ state: initialState })
-
-        userStorage = store.domain.use(UserStorageDomain, store.domain.state.prop('users'))
-        orderStorage = store.domain.use(OrderStorageDomain, store.domain.state.prop('orders'))
-        productStorage = store.domain.use(ProductStorageDomain, store.domain.state.prop('products'))
+        userStorage = store.domain.select('users').use(UserStorageDomain) as UserStorageDomain<RootState>
+        orderStorage = store.domain.select('orders').use(OrderStorageDomain) as OrderStorageDomain<RootState>
+        productStorage = store.domain.select('products').use(ProductStorageDomain) as ProductStorageDomain<RootState>
     })
 
     describe('User Operations', () => {
         it('should get user', () => {
-            const result = Result.runSync(userStorage.getUser('user1'))
-            if (result.type === 'err') throw new Error('Expected user but got error')
-            expect(result.value.name).toBe('John Doe')
+            const result = store.runQuery((userStorage as any).getUser('user1'))
+            if (
+                result != null &&
+                typeof result === 'object' &&
+                'type' in result &&
+                (result as DomainErrResult).type === 'err'
+            )
+                throw new Error('Expected user but got error')
+            expect((result as UserEntity).name).toBe('John Doe')
         })
 
         it('should add user', () => {
-            const newUser = {
-                id: 'user2',
-                name: 'Jane Doe',
-                orderIds: [],
-            }
-            Result.runSync(userStorage.addUser(newUser))
+            const newUser = { id: 'user2', name: 'Jane Doe', orderIds: [] }
+            store.runCommand((userStorage as any).addUser(newUser))
 
-            const result = Result.runSync(userStorage.getUser('user2'))
-            if (result.type === 'err') throw new Error('Expected user but got error')
-            expect(result.value.name).toBe('Jane Doe')
+            const result = store.runQuery((userStorage as any).getUser('user2'))
+            if (
+                result != null &&
+                typeof result === 'object' &&
+                'type' in result &&
+                (result as DomainErrResult).type === 'err'
+            )
+                throw new Error('Expected user but got error')
+            expect((result as UserEntity).name).toBe('Jane Doe')
         })
     })
 
     describe('Order Operations', () => {
         it('should get order', () => {
-            const result = Result.runSync(orderStorage.getOrder('order1'))
-            if (result.type === 'err') throw new Error('Expected order but got error')
-            expect(result.value.userId).toBe('user1')
+            const result = store.runQuery((orderStorage as any).getOrder('order1'))
+            if (
+                result != null &&
+                typeof result === 'object' &&
+                'type' in result &&
+                (result as DomainErrResult).type === 'err'
+            )
+                throw new Error('Expected order but got error')
+            expect((result as OrderEntity).userId).toBe('user1')
         })
 
         it('should add product to order', () => {
-            Result.runSync(
-                productStorage.addProduct({
+            store.runCommand(
+                (productStorage as any).addProduct({
                     id: 'product2',
                     name: 'MacBook',
                     price: 1999,
@@ -189,44 +210,68 @@ describe('Graph Domain Operations', () => {
                 }),
             )
 
-            Result.runSync(orderStorage.addProduct('order1', 'product2'))
+            store.runCommand((orderStorage as any).addProduct('order1', 'product2'))
 
-            const result = Result.runSync(orderStorage.getOrder('order1'))
-            if (result.type === 'err') throw new Error('Expected order but got error')
-            expect(result.value.productIds).toEqual(['product1', 'product2'])
+            const result = store.runQuery((orderStorage as any).getOrder('order1'))
+            if (
+                result != null &&
+                typeof result === 'object' &&
+                'type' in result &&
+                (result as DomainErrResult).type === 'err'
+            )
+                throw new Error('Expected order but got error')
+            expect((result as OrderEntity).productIds).toEqual(['product1', 'product2'])
         })
     })
 
     describe('Product Operations', () => {
         it('should get product', () => {
-            const result = Result.runSync(productStorage.getProduct('product1'))
-            if (result.type === 'err') throw new Error('Expected product but got error')
-            expect(result.value.name).toBe('iPhone')
+            const result = store.runQuery((productStorage as any).getProduct('product1'))
+            if (
+                result != null &&
+                typeof result === 'object' &&
+                'type' in result &&
+                (result as DomainErrResult).type === 'err'
+            )
+                throw new Error('Expected product but got error')
+            expect((result as ProductEntity).name).toBe('iPhone')
         })
 
         it('should get collectors', () => {
-            const result = Result.runSync(productStorage.getCollectors('product1'))
-            if (result.type === 'err') throw new Error('Expected collectors but got error')
-            expect(result.value.length).toBe(1)
-            expect(result.value[0].name).toBe('John Doe')
+            const result = store.runQuery((productStorage as any).getCollectors('product1'))
+            if (
+                result != null &&
+                typeof result === 'object' &&
+                'type' in result &&
+                (result as DomainErrResult).type === 'err'
+            )
+                throw new Error('Expected collectors but got error')
+            expect((result as UserEntity[]).length).toBe(1)
+            expect((result as UserEntity[])[0].name).toBe('John Doe')
         })
     })
 
     describe('Graph Relationships', () => {
         it('should maintain user-order relationship', () => {
-            Result.runSync(
-                orderStorage.addOrder({
+            store.runCommand(
+                (orderStorage as any).addOrder({
                     id: 'order2',
                     userId: 'user1',
                     productIds: [],
                 }),
             )
 
-            Result.runSync(userStorage.addOrder('user1', 'order2'))
+            store.runCommand((userStorage as any).addOrder('user1', 'order2'))
 
-            const userResult = Result.runSync(userStorage.getUser('user1'))
-            if (userResult.type === 'err') throw new Error('Expected user but got error')
-            expect(userResult.value.orderIds).toEqual(['order1', 'order2'])
+            const userResult = store.runQuery((userStorage as any).getUser('user1'))
+            if (
+                userResult != null &&
+                typeof userResult === 'object' &&
+                'type' in userResult &&
+                (userResult as DomainErrResult).type === 'err'
+            )
+                throw new Error('Expected user but got error')
+            expect((userResult as UserEntity).orderIds).toEqual(['order1', 'order2'])
         })
     })
 })
