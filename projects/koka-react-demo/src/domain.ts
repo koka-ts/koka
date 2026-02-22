@@ -52,25 +52,39 @@ export type AnimationState = {
     progress: number
 }
 
-export function rafThenDelay(): Promise<void> {
-    return new Promise((resolve) => {
-        requestAnimationFrame(() => {
-            resolve()
-        })
+export function rafThenDelay(abortSignal?: AbortSignal): Promise<void> {
+    return new Promise((resolve, reject) => {
+        const id = requestAnimationFrame(() => resolve())
+        if (abortSignal?.aborted) {
+            cancelAnimationFrame(id)
+            reject(new DOMException('Aborted', 'AbortError'))
+            return
+        }
+        abortSignal?.addEventListener(
+            'abort',
+            () => {
+                cancelAnimationFrame(id)
+                reject(new DOMException('Aborted', 'AbortError'))
+                return
+            },
+            { once: true },
+        )
     })
 }
 
 /**
  * Reusable animation domain: single AnimationState | undefined per instance.
- * animate(initialState) sets state and runs a while-true loop with waitFor(rafThenDelay),
- * advancing progress each frame until progress >= 1, then clears state and returns.
+ * animate(initialState) runs until progress >= 1 or the caller's run is aborted (switch).
+ * When called from a command that uses command.context(), respects that run's abortController.
  */
 export class AnimationDomain<Root = any> extends Domain<AnimationState | undefined, Root> {
     @command()
     *animate(initialState: AnimationState) {
         yield* set(this, initialState)
+        const ctx = yield* command.context()
+        const signal = ctx.abortController.signal
         while (true) {
-            yield* waitFor(rafThenDelay())
+            yield* waitFor(rafThenDelay(signal))
             const anim = yield* get(this)
             if (anim == undefined) {
                 return
@@ -117,7 +131,10 @@ export class TodoDomain<Root = any> extends Domain<Todo, Root> {
 
     @command()
     *removeTodo() {
+        const ctx = yield* command.context()
+        if (ctx.previous) return
         const todo = yield* get(this)
+
         yield* this.animation.animate({
             kind: 'exit',
             startedAt: Date.now(),
@@ -156,8 +173,12 @@ export class TodoListDomain<Root = any> extends Domain<Todo[], Root> {
     *clearCompleted() {
         const todos = yield* get(this)
         const completed = todos.filter((t) => t.done)
-        if (completed.length === 0) return 'completed todos cleared'
-        yield* all(completed.map((t) => this.todo(t.id).removeTodo()))
+        if (completed.length === 0) {
+            return 'completed todos cleared'
+        }
+        const ctx = yield* command.context()
+        yield* waitFor(ctx.previous?.return)
+        yield* all(completed.map((todo) => this.todo(todo.id).removeTodo()))
         return 'completed todos cleared'
     }
 

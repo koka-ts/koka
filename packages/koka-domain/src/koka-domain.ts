@@ -243,6 +243,9 @@ export type GenWaitRequest = { type: 'wait'; promise: Promise<unknown> }
 /** Run multiple generators in parallel; wait requests are collected and Promise.all'd each frame. */
 export type GenAllRequest = { type: 'all'; generators: Generator<GenRequest, unknown, unknown>[] }
 
+/** Only valid inside @command; yields current run's CommandContext (created lazily). Use: yield* command.context() */
+export type GenGetCommandContextRequest = { type: 'getCommandContext' }
+
 export type GenRequest =
     | GenGetRequest
     | GenGetResultRequest
@@ -250,6 +253,7 @@ export type GenRequest =
     | GenEmitRequest
     | GenWaitRequest
     | GenAllRequest
+    | GenGetCommandContextRequest
 
 export type QueryRequest = GenGetRequest | GenGetResultRequest
 
@@ -260,6 +264,7 @@ export type CommandRequest =
     | GenEmitRequest
     | GenWaitRequest
     | GenAllRequest
+    | GenGetCommandContextRequest
 
 export type EffectRequest =
     | GenGetRequest
@@ -295,6 +300,42 @@ export type EffectContext = {
     abortSignal: AbortSignal
     abortController: AbortController
 }
+
+/**
+ * Context for a single command run. Provides time-dimension access:
+ * - **Sequence**: `yield* waitFor(ctx.previous?.return)` — wait for previous run to finish.
+ * - **Switch**: `ctx.previous?.abortController.abort()` — cancel previous run.
+ */
+export type CommandContext<Args extends Serializable[] = Serializable[], T = unknown> = {
+    /** Arguments passed to this command invocation. */
+    args: Args
+    /** Resolves when this run completes (sync or async). Use for sequence: waitFor(ctx.previous?.return). */
+    return: Promise<T>
+    /** Abort this run, or previous: ctx.previous?.abortController.abort() for switch semantics. */
+    abortController: AbortController
+    /** Context of the previous invocation (same domain+method). Undefined on first run. */
+    previous?: CommandContext<Serializable[], unknown>
+}
+
+/** Helper namespace for command context types and semantics. */
+export const commandContext = {
+    /**
+     * Type helper for CommandContext when using yield* command.context().
+     * Example: const ctx = yield* command.context() as commandContext.Ctx<[string], string>
+     */
+    Ctx: undefined as unknown as new <Args extends Serializable[] = Serializable[], T = unknown>() => CommandContext<
+        Args,
+        T
+    >,
+}
+
+/** Internal: used by Store to resolve/reject ctx.return. */
+const COMMAND_CONTEXT_SETTLE = Symbol.for('koka-domain.commandContext.settle')
+export type CommandContextSettle = {
+    resolve: (value: unknown) => void
+    reject: (reason: unknown) => void
+}
+export type CommandContextWithSettle = CommandContext & { [COMMAND_CONTEXT_SETTLE]: CommandContextSettle }
 
 /** Effect 方法签名：由 @effect 装饰的方法 */
 export type EffectMethod<
@@ -915,6 +956,8 @@ export type GenRunMeta = {
     args: Serializable[]
     /** Query only: args -> cacheKey for incremental computation, set in @query decorator */
     cacheKey?: string
+    /** Set when using @commandWithContext: context for this run (sequence/switch semantics). */
+    commandContext?: CommandContextWithSettle
 }
 
 const genToMeta = new WeakMap<Generator<GenRequest, unknown, unknown>, GenRunMeta>()
@@ -945,7 +988,11 @@ function runFiberUntilWaitOrDone<Root>(
         const step = current.next(sendValue)
         if (step.done) {
             const returnValue = step.value
-            if (stack.length === 0) return { done: returnValue }
+            if (stack.length === 0) {
+                const meta = genToMeta.get(current)
+                meta?.commandContext?.[COMMAND_CONTEXT_SETTLE]?.resolve(returnValue)
+                return { done: returnValue }
+            }
             const prev = stack.pop()!
             current = prev.gen
             sendValue = returnValue
@@ -995,6 +1042,17 @@ function runFiberUntilWaitOrDone<Root>(
         if (req.type === 'all') {
             throw new Error('[koka-domain] all() cannot be nested inside all()')
         }
+        if (req.type === 'getCommandContext') {
+            const meta = genToMeta.get(current)
+            if (!meta) {
+                throw new Error('[koka-domain] getCommandContext only valid inside a command run')
+            }
+            if (!meta.commandContext) {
+                meta.commandContext = store.createCommandContext(meta.domain, meta.methodName, meta.args)
+            }
+            sendValue = meta.commandContext
+            continue
+        }
         req as never satisfies never
         throw new Error('[koka-domain] runFiberUntilWaitOrDone: unknown request')
     }
@@ -1033,11 +1091,19 @@ function runAllParallel<Root>(
     return step()
 }
 
+type RunGeneratorCallbacks = {
+    onComplete?: (value: unknown) => void
+    onError?: (reason: unknown) => void
+    /** When set, getCommandContext request will create context for this meta and return it; onComplete/onError settle meta.commandContext. */
+    commandMeta?: GenRunMeta
+}
+
 function runGenerator<Root>(
     store: Store<Root>,
     gen: Generator<GenRequest, unknown, unknown>,
     queryStorage: QueryStorage | null,
     effectStorage: EffectStorage | null = null,
+    callbacks?: RunGeneratorCallbacks,
 ): unknown {
     let sendValue: unknown = undefined
     let current: Generator<GenRequest, unknown, unknown> = gen
@@ -1048,6 +1114,7 @@ function runGenerator<Root>(
         queryStorage: QueryStorage | null
         effectStorage: EffectStorage | null
     }> = []
+    const { onComplete, onError, commandMeta } = callbacks ?? {}
 
     for (;;) {
         const step = current.next(sendValue)
@@ -1058,6 +1125,7 @@ function runGenerator<Root>(
                     currentQueryStorage.result = Accessor.ok(returnValue) as Result<any>
                     currentQueryStorage.version = store.version
                 }
+                onComplete?.(returnValue)
                 return returnValue
             }
             const prev = stack.pop()!
@@ -1146,7 +1214,16 @@ function runGenerator<Root>(
         } else if (req.type === 'wait') {
             req.promise.then(
                 (value) => {
-                    runGeneratorStep(store, current, value, stack, currentQueryStorage, currentEffectStorage)
+                    runGeneratorStep(
+                        store,
+                        current,
+                        value,
+                        stack,
+                        currentQueryStorage,
+                        currentEffectStorage,
+                        undefined,
+                        callbacks,
+                    )
                 },
                 (reason) => {
                     runGeneratorStep(
@@ -1157,15 +1234,38 @@ function runGenerator<Root>(
                         currentQueryStorage,
                         currentEffectStorage,
                         reason,
+                        callbacks,
                     )
                 },
             )
             return
         } else if (req.type === 'all') {
             runAllParallel(store, req.generators).then((results) => {
-                runGeneratorStep(store, current, results, stack, currentQueryStorage, currentEffectStorage)
+                runGeneratorStep(
+                    store,
+                    current,
+                    results,
+                    stack,
+                    currentQueryStorage,
+                    currentEffectStorage,
+                    undefined,
+                    callbacks,
+                )
             })
             return
+        } else if (req.type === 'getCommandContext') {
+            if (!commandMeta) {
+                throw new Error('[koka-domain] getCommandContext only valid inside a command run')
+            }
+            if (!commandMeta.commandContext) {
+                commandMeta.commandContext = store.createCommandContext(
+                    commandMeta.domain,
+                    commandMeta.methodName,
+                    commandMeta.args,
+                )
+            }
+            sendValue = commandMeta.commandContext
+            continue
         } else {
             req as never satisfies never
             throw new Error('[koka-domain] runGenerator: unknown request')
@@ -1185,15 +1285,20 @@ function runGeneratorStep<Root>(
     currentQueryStorage: QueryStorage | null,
     currentEffectStorage: EffectStorage | null,
     throwReason?: unknown,
+    callbacks?: RunGeneratorCallbacks,
 ): void {
+    const { onComplete, onError } = callbacks ?? {}
     let step: IteratorResult<GenRequest, unknown>
     if (throwReason !== undefined) {
         try {
             step = current.throw(throwReason)
         } catch (e) {
-            if (stack.length === 0) throw e
+            if (stack.length === 0) {
+                onError?.(e)
+                throw e
+            }
             const prev = stack.pop()!
-            runGeneratorStep(store, prev.gen, e, stack, prev.queryStorage, prev.effectStorage, e)
+            runGeneratorStep(store, prev.gen, e, stack, prev.queryStorage, prev.effectStorage, e, callbacks)
             return
         }
     } else {
@@ -1206,10 +1311,20 @@ function runGeneratorStep<Root>(
                 currentQueryStorage.result = Accessor.ok(returnValue) as Result<any>
                 currentQueryStorage.version = store.version
             }
+            onComplete?.(returnValue)
             return
         }
         const prev = stack.pop()!
-        runGeneratorStep(store, prev.gen, returnValue, stack, prev.queryStorage, prev.effectStorage)
+        runGeneratorStep(
+            store,
+            prev.gen,
+            returnValue,
+            stack,
+            prev.queryStorage,
+            prev.effectStorage,
+            undefined,
+            callbacks,
+        )
         return
     }
     const yielded = step.value
@@ -1249,7 +1364,7 @@ function runGeneratorStep<Root>(
             }
         }
         stack.push({ gen: current, queryStorage: currentQueryStorage, effectStorage: currentEffectStorage })
-        runGeneratorStep(store, subGen, undefined, stack, subStorage, currentEffectStorage)
+        runGeneratorStep(store, subGen, undefined, stack, subStorage, currentEffectStorage, undefined, callbacks)
         return
     }
     const req = yielded as GenRequest
@@ -1268,7 +1383,16 @@ function runGeneratorStep<Root>(
             if (currentEffectStorage) return
             throw result.error
         }
-        runGeneratorStep(store, current, result.value, stack, currentQueryStorage, currentEffectStorage)
+        runGeneratorStep(
+            store,
+            current,
+            result.value,
+            stack,
+            currentQueryStorage,
+            currentEffectStorage,
+            undefined,
+            callbacks,
+        )
         return
     }
     if (req.type === 'getResult') {
@@ -1285,7 +1409,7 @@ function runGeneratorStep<Root>(
         if (res !== null && typeof res === 'object' && (res as Result<unknown>).type === 'err') {
             if (currentEffectStorage) return
         }
-        runGeneratorStep(store, current, res, stack, currentQueryStorage, currentEffectStorage)
+        runGeneratorStep(store, current, res, stack, currentQueryStorage, currentEffectStorage, undefined, callbacks)
         return
     }
     if (req.type === 'set') {
@@ -1298,29 +1422,98 @@ function runGeneratorStep<Root>(
         ) {
             return
         }
-        runGeneratorStep(store, current, newSendValue, stack, currentQueryStorage, currentEffectStorage)
+        runGeneratorStep(
+            store,
+            current,
+            newSendValue,
+            stack,
+            currentQueryStorage,
+            currentEffectStorage,
+            undefined,
+            callbacks,
+        )
         return
     }
     if (req.type === 'emit') {
         store.emitEvent(req.event)
-        runGeneratorStep(store, current, undefined, stack, currentQueryStorage, currentEffectStorage)
+        runGeneratorStep(
+            store,
+            current,
+            undefined,
+            stack,
+            currentQueryStorage,
+            currentEffectStorage,
+            undefined,
+            callbacks,
+        )
         return
     }
     if (req.type === 'wait') {
         req.promise.then(
             (value) => {
-                runGeneratorStep(store, current, value, stack, currentQueryStorage, currentEffectStorage)
+                runGeneratorStep(
+                    store,
+                    current,
+                    value,
+                    stack,
+                    currentQueryStorage,
+                    currentEffectStorage,
+                    undefined,
+                    callbacks,
+                )
             },
             (reason) => {
-                runGeneratorStep(store, current, undefined, stack, currentQueryStorage, currentEffectStorage, reason)
+                runGeneratorStep(
+                    store,
+                    current,
+                    undefined,
+                    stack,
+                    currentQueryStorage,
+                    currentEffectStorage,
+                    reason,
+                    callbacks,
+                )
             },
         )
         return
     }
     if (req.type === 'all') {
         runAllParallel(store, req.generators).then((results) => {
-            runGeneratorStep(store, current, results, stack, currentQueryStorage, currentEffectStorage)
+            runGeneratorStep(
+                store,
+                current,
+                results,
+                stack,
+                currentQueryStorage,
+                currentEffectStorage,
+                undefined,
+                callbacks,
+            )
         })
+        return
+    }
+    if (req.type === 'getCommandContext') {
+        const { commandMeta } = callbacks ?? {}
+        if (!commandMeta) {
+            throw new Error('[koka-domain] getCommandContext only valid inside a command run')
+        }
+        if (!commandMeta.commandContext) {
+            commandMeta.commandContext = store.createCommandContext(
+                commandMeta.domain,
+                commandMeta.methodName,
+                commandMeta.args,
+            )
+        }
+        runGeneratorStep(
+            store,
+            current,
+            commandMeta.commandContext,
+            stack,
+            currentQueryStorage,
+            currentEffectStorage,
+            undefined,
+            callbacks,
+        )
         return
     }
     req as never satisfies never
@@ -1359,9 +1552,19 @@ export function* emit<E extends AnyEvent>(event: E): Generator<GenEmitRequest, v
  * Suspend effect execution until the given promise resolves or rejects. Only use inside @effect.
  * Resolves: returns the resolved value (runner calls gen.next(value)). Rejects: runner calls gen.throw(reason), so try/catch works.
  */
-export function* waitFor<T>(promise: Promise<T>): Generator<GenWaitRequest, T, unknown> {
-    const value = yield { type: 'wait', promise }
-    return value as T
+export function* waitFor<T extends Promise<any> | undefined>(
+    promise: T,
+): Generator<GenWaitRequest, Awaited<T>, unknown> {
+    if (promise == undefined) {
+        return undefined as Awaited<T>
+    }
+
+    if (promise instanceof Promise) {
+        const value = yield { type: 'wait', promise }
+        return value as Awaited<T>
+    }
+
+    return promise as Awaited<T>
 }
 
 /**
@@ -1384,12 +1587,19 @@ const getEffectfulMethods = (domain: AnyDomain): Map<string, AnyEffectMethod> | 
 // Store class
 // ---------------------------------------------------------------------------
 
+/** Key for last command context (domain.key + methodName). */
+function commandContextKey(domain: AnyDomain, methodName: string): string {
+    return `${domain.key}:${methodName}`
+}
+
 export class Store<Root> implements IStore<Root> {
     state: Root
     domain: Domain<Root, Root>
 
     plugins: StorePlugin<Root>[] = []
     private pluginCleanup: (() => void)[] = []
+    /** Last command context per domain+method for previous / sequence / switch. */
+    private lastCommandContextByKey = new Map<string, CommandContextWithSettle>()
 
     constructor(options: StoreOptions<Root>) {
         this.state = options.state
@@ -1417,6 +1627,35 @@ export class Store<Root> implements IStore<Root> {
             }
         }
         return () => {}
+    }
+
+    /**
+     * Create command context for a run (used by @commandWithContext). Sets ctx.previous from last run.
+     * Caller must settle ctx via COMMAND_CONTEXT_SETTLE when the run completes or throws.
+     */
+    createCommandContext<Args extends Serializable[], T = unknown>(
+        domain: AnyDomain,
+        methodName: string,
+        args: Args,
+    ): CommandContextWithSettle & CommandContext<Args, T> {
+        const key = commandContextKey(domain, methodName)
+        const previous = this.lastCommandContextByKey.get(key) as CommandContext<Serializable[], unknown> | undefined
+        let resolve!: (value: unknown) => void
+        let reject!: (reason: unknown) => void
+        const returnPromise = new Promise<T>((res, rej) => {
+            resolve = (v: unknown) => res(v as T)
+            reject = rej
+        })
+        const abortController = new AbortController()
+        const ctx = {
+            args,
+            return: returnPromise,
+            abortController,
+            previous,
+            [COMMAND_CONTEXT_SETTLE]: { resolve, reject },
+        } as CommandContextWithSettle & CommandContext<Args, T>
+        this.lastCommandContextByKey.set(key, ctx)
+        return ctx
     }
 
     getState() {
@@ -1840,8 +2079,22 @@ export class Store<Root> implements IStore<Root> {
         if (!meta) {
             throw new Error('[koka-domain] runCommand: generator not registered')
         }
-        const result = runGenerator(this, gen as Generator<GenRequest, unknown, unknown>, null)
-        return result as Return
+        const callbacks: RunGeneratorCallbacks = {
+            commandMeta: meta,
+            onComplete(value) {
+                meta.commandContext?.[COMMAND_CONTEXT_SETTLE]?.resolve(value)
+            },
+            onError(reason) {
+                meta.commandContext?.[COMMAND_CONTEXT_SETTLE]?.reject(reason)
+            },
+        }
+        try {
+            const result = runGenerator(this, gen as Generator<GenRequest, unknown, unknown>, null, null, callbacks)
+            return result as Return
+        } catch (e) {
+            meta.commandContext?.[COMMAND_CONTEXT_SETTLE]?.reject(e)
+            throw e
+        }
     }
 
     emitEvent<E extends AnyEvent>(event: E): void {
@@ -1982,33 +2235,45 @@ export function query() {
     }
 }
 
-export function command() {
-    return function <This, Args extends Serializable[], Request extends CommandRequest, Return, Root = any>(
-        target: (this: This, ...args: Args) => Generator<Request, Return, unknown>,
-        context: KokaClassMethodDecoratorContext<This, typeof target>,
-    ): typeof target {
-        const methodName = context.name
-        function wrapper(this: any, ...args: Args) {
-            const gen = target.call(this, ...args) as Generator<Request, unknown, unknown>
-            registerGen(gen as Generator<GenRequest, unknown, unknown>, {
-                domain: this as AnyDomain,
-                methodName,
-                args: args as Serializable[],
-            })
-            return gen
-        }
-        context.addInitializer(function (this: This) {
-            if (!(this instanceof Domain)) {
-                throw new Error('Command must be used on a Domain class')
-            }
-            ;(this as any)[methodName] = wrapper.bind(this)
-            const bound = (this as any)[methodName]
-            bound.domain = this
-            bound.methodName = methodName
-        })
-        return wrapper as typeof target
-    }
+/** Generator helper: yield* command.context() inside a @command to get current run's context (no extra args). */
+function* commandContextGenerator(): Generator<GenGetCommandContextRequest, CommandContext, unknown> {
+    const ctx = yield { type: 'getCommandContext' }
+    return ctx as CommandContext
 }
+
+export const command = Object.assign(
+    function command() {
+        return function <This, Args extends Serializable[], Request extends CommandRequest, Return, Root = any>(
+            target: (this: This, ...args: Args) => Generator<Request, Return, unknown>,
+            context: KokaClassMethodDecoratorContext<This, typeof target>,
+        ): typeof target {
+            const methodName = context.name
+            function wrapper(this: any, ...args: Args) {
+                const gen = target.call(this, ...args) as Generator<Request, unknown, unknown>
+                registerGen(gen as Generator<GenRequest, unknown, unknown>, {
+                    domain: this as AnyDomain,
+                    methodName,
+                    args: args as Serializable[],
+                })
+                return gen
+            }
+            context.addInitializer(function (this: This) {
+                if (!(this instanceof Domain)) {
+                    throw new Error('Command must be used on a Domain class')
+                }
+                ;(this as any)[methodName] = wrapper.bind(this)
+                const bound = (this as any)[methodName]
+                bound.domain = this
+                bound.methodName = methodName
+            })
+            return wrapper as typeof target
+        }
+    },
+    {
+        /** Inside a @command: yield* command.context() for ctx (args, return, abortController, previous). Sequence: waitFor(ctx.previous?.return); Switch: ctx.previous?.abortController.abort(). */
+        context: commandContextGenerator,
+    },
+)
 
 export function effect() {
     return function <This, Args extends [] | [ctx: EffectContext], Request extends EffectRequest>(
