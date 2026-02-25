@@ -99,7 +99,7 @@ export class AnimationDomain<Root = any> extends Domain<AnimationState | undefin
     }
 }
 
-export const REMOVE_ANIMATION_MS = 3200
+export const REMOVE_ANIMATION_MS = 320
 
 // ---------------------------------------------------------------------------
 // Todo: extends with optional animation state

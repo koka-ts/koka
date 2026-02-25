@@ -1,14 +1,10 @@
 import * as Accessor from 'koka-accessor'
+import * as Koka from 'koka'
+import * as Async from 'koka/async'
+import * as Ctx from 'koka/ctx'
 import { shallowEqual } from './shallowEqual'
 
-// ---------------------------------------------------------------------------
-// Re-export shallowEqual
-// ---------------------------------------------------------------------------
 export { shallowEqual }
-
-// ---------------------------------------------------------------------------
-// Serializable & Result
-// ---------------------------------------------------------------------------
 
 export type SerializablePrimitives = void | undefined | number | string | boolean | null
 
@@ -19,6 +15,35 @@ export type SerializableObject = { [key: string]: Serializable }
 
 export type Serializable = SerializablePrimitives | SerializableArray | SerializableObject
 
+function stableStringify(obj: unknown, seen = new WeakMap<object, boolean>()): string {
+    if (obj === null || typeof obj !== 'object') {
+        return String(obj)
+    }
+    if (typeof (obj as { then?: unknown }).then === 'function') {
+        return '[Promise]'
+    }
+    if (obj instanceof Date) {
+        return `Date(${obj.getTime()})`
+    }
+    if (obj instanceof RegExp) {
+        return obj.toString()
+    }
+    if (seen.has(obj as object)) {
+        return '[Circular]'
+    }
+    seen.set(obj as object, true)
+    if (Array.isArray(obj)) {
+        const parts = obj.map((item) => stableStringify(item, seen))
+        return `[${parts.join(',')}]`
+    }
+    const sortedKeys = Object.keys(obj as Record<string, unknown>).sort()
+    const pairs = sortedKeys.map((key) => {
+        const value = (obj as Record<string, unknown>)[key]
+        return `${key}:${stableStringify(value, seen)}`
+    })
+    return `{${pairs.join(',')}}`
+}
+
 export type ToType<T> = T extends object | unknown[]
     ? {
           [key in keyof T]: ToType<T[key]>
@@ -26,10 +51,6 @@ export type ToType<T> = T extends object | unknown[]
     : T
 
 export type Result<T> = Accessor.AccessorResult<T>
-
-// ---------------------------------------------------------------------------
-// Domain path (structural description of domain tree)
-// ---------------------------------------------------------------------------
 
 export type DomainSelectPath = {
     type: 'select'
@@ -94,17 +115,9 @@ export type DomainPath =
     | DomainFilterPath
     | DomainMapPath
 
-// ---------------------------------------------------------------------------
-// SetStateInput
-// ---------------------------------------------------------------------------
-
 export type SetStateInput<S> = S | Accessor.Updater<S> | ((state: S) => S)
 
-// ---------------------------------------------------------------------------
-// Event types
-// ---------------------------------------------------------------------------
-
-export type EventRequest = GenGetRequest | GenGetResultRequest | GenSetRequest | GenEmitRequest
+export type EventRequest = Koka.AnyEff | GenGetRequest | GenGetResultRequest | GenSetRequest | GenEmitRequest
 
 export interface Event<Name extends string, T> {
     type: 'event'
@@ -120,14 +133,9 @@ export type AnyEventCtor = EventCtor<string, any>
 
 export type EventValue<E extends AnyEvent> = E['payload']
 
-/** Event handler: generator method taking event payload, yielding GenRequest. */
-export type EventHandler<E extends AnyEventCtor> = (
+export type EventHandler<E extends AnyEventCtor, Request extends EventRequest = EventRequest> = (
     event: EventValue<InstanceType<E>>,
-) => Generator<EventRequest, void, unknown>
-
-// ---------------------------------------------------------------------------
-// Store options (interface to break circular ref; Store class defined later)
-// ---------------------------------------------------------------------------
+) => Generator<Request, void, unknown>
 
 export interface IStore<Root> {
     getState(): Root
@@ -141,12 +149,6 @@ export type StoreOptions<Root> = {
     plugins?: StorePlugin<Root, IStore<Root>>[]
 }
 
-// InferStoreState, InferDomainState, InferDomainRoot, ObjectShape, StoreCtor exported after Store/Domain
-
-// ---------------------------------------------------------------------------
-// Decorator context (for @query, @command, @event, @effect)
-// ---------------------------------------------------------------------------
-
 export type KokaClassMethodDecoratorContext<
     This = unknown,
     Value extends (this: This, ...args: any) => any = (this: This, ...args: any) => any,
@@ -154,10 +156,6 @@ export type KokaClassMethodDecoratorContext<
     name: string
     static: false
 }
-
-// ---------------------------------------------------------------------------
-// getKeyFromPath / getDomainCtorKey / getDomainCacheKey (before Domain)
-// ---------------------------------------------------------------------------
 
 const getKeyFromPathCache = new WeakMap<DomainPath, string>()
 
@@ -180,9 +178,8 @@ export function getKeyFromPath(path: DomainPath): string {
     } else if (path.type === 'map') {
         result = getKeyFromPath(path.prev) + '.' + `map(${path.key})`
     } else if (path.type === 'object') {
-        result = `object(${Object.entries(path.shape)
-            .map(([pathKey, subPath]) => `${pathKey}:${getKeyFromPath(subPath)}`)
-            .join(', ')})`
+        const entries = Object.entries(path.shape).sort(([a], [b]) => a.localeCompare(b))
+        result = `object(${entries.map(([pathKey, subPath]) => `${pathKey}:${getKeyFromPath(subPath)}`).join(', ')})`
     } else if (path.type === 'union') {
         result = `union(${path.variants.map((variant) => getKeyFromPath(variant)).join(' | ')})`
     } else if (path.type === 'optional') {
@@ -211,11 +208,6 @@ export function getDomainCacheKey(Ctor: new (...args: any[]) => any, path: Domai
     return getDomainCtorKey(Ctor) + ':' + getKeyFromPath(path)
 }
 
-// ---------------------------------------------------------------------------
-// Domain class & related types
-// ---------------------------------------------------------------------------
-
-/** Single parent (derived) or multiple parents (composited). Root has no parent. */
 export type ParentDomains<Root> = Domain<any, Root> | Set<Domain<any, Root>>
 
 export type AnyDomain = Domain<any, any>
@@ -229,50 +221,43 @@ export type DomainCtor<StateType, Root, This extends Domain<StateType, Root> = D
 
 export type AnyDomainCtor = DomainCtor<any, any>
 
-// ---------------------------------------------------------------------------
-// Generator request shapes (depend on AnyDomain)
-// ---------------------------------------------------------------------------
+type GetDomain = <State, Root = any>(domain: Domain<State, Root>) => State
 
-export type GenGetRequest = { type: 'get'; domain: AnyDomain }
-export type GenGetResultRequest = { type: 'getResult'; domain: AnyDomain }
-export type GenSetRequest = { type: 'set'; domain: AnyDomain; setStateInput: SetStateInput<unknown> }
-export type GenEmitRequest = { type: 'emit'; event: AnyEvent }
-/** Only valid inside @effect; suspends until promise resolves (gen.next(value)) or rejects (gen.throw(reason)). */
-export type GenWaitRequest = { type: 'wait'; promise: Promise<unknown> }
+type GetDomainResult = <State, Root = any>(domain: Domain<State, Root>) => Result<State>
 
-/** Run multiple generators in parallel; wait requests are collected and Promise.all'd each frame. */
-export type GenAllRequest = { type: 'all'; generators: Generator<GenRequest, unknown, unknown>[] }
+type SetDomain = <State, Root = any>(domain: Domain<State, Root>, setStateInput: SetStateInput<State>) => Result<Root>
 
-/** Only valid inside @command; yields current run's CommandContext (created lazily). Use: yield* command.context() */
-export type GenGetCommandContextRequest = { type: 'getCommandContext' }
+type EmitEvent = (event: AnyEvent) => void
+
+type GetCommandContext = () => AsyncCommandContext
+
+class GenGetRequest extends Ctx.Ctx('GenGetRequest')<GetDomain> {}
+
+class GenGetResultRequest extends Ctx.Ctx('GenGetResultRequest')<GetDomainResult> {}
+class GenSetRequest extends Ctx.Ctx('GenSetRequest')<SetDomain> {}
+class GenEmitRequest extends Ctx.Ctx('GenEmitRequest')<EmitEvent> {}
+class GenGetCommandContextRequest extends Ctx.Ctx('GenGetCommandContextRequest')<GetCommandContext> {}
 
 export type GenRequest =
     | GenGetRequest
     | GenGetResultRequest
     | GenSetRequest
     | GenEmitRequest
-    | GenWaitRequest
-    | GenAllRequest
     | GenGetCommandContextRequest
 
 export type QueryRequest = GenGetRequest | GenGetResultRequest
 
-export type CommandRequest =
-    | GenGetRequest
-    | GenGetResultRequest
-    | GenSetRequest
-    | GenEmitRequest
-    | GenWaitRequest
-    | GenAllRequest
-    | GenGetCommandContextRequest
+/** Command 可发出的请求与 GenRequest 一致 */
+export type CommandRequest = GenRequest
 
-export type EffectRequest =
-    | GenGetRequest
-    | GenGetResultRequest
-    | GenSetRequest
-    | GenEmitRequest
-    | GenWaitRequest
-    | GenAllRequest
+export type EffectRequest = GenGetRequest | GenGetResultRequest | GenSetRequest | GenEmitRequest
+
+export type RunnerMode = 'sync' | 'async'
+
+export type AsyncQueryRequest = QueryRequest | Async.Async
+export type AsyncCommandRequest = CommandRequest | Async.Async
+export type AsyncEventRequest = EventRequest | Async.Async
+export type AsyncEffectRequest = EffectRequest | Async.Async
 
 export type Query<Args extends Serializable[], Return> = ((
     ...args: Args
@@ -281,11 +266,24 @@ export type Query<Args extends Serializable[], Return> = ((
     methodName: string
 }
 
+export type AsyncQuery<Args extends Serializable[], Return> = ((
+    ...args: Args
+) => Generator<AsyncQueryRequest, Return, unknown>) & {
+    domain: AnyDomain
+    methodName: string
+}
+
 export type AnyQuery = Query<any, any>
+
+export type AnyAsyncQuery = AsyncQuery<any, any>
 
 export type QueryRun<Return = unknown> = Generator<QueryRequest, Return, unknown>
 
 export type AnyQueryRun = QueryRun<any>
+
+export type AsyncQueryRun<Return = unknown> = Generator<AsyncQueryRequest, Return, unknown>
+
+export type AnyAsyncQueryRun = AsyncQueryRun<any>
 
 export type Command<Args extends Serializable[], Return> = ((
     ...args: Args
@@ -296,48 +294,62 @@ export type Command<Args extends Serializable[], Return> = ((
 
 export type AnyCommand = Command<any, any>
 
+export type AsyncCommand<Args extends Serializable[], Return> = ((
+    ...args: Args
+) => Generator<AsyncCommandRequest, Return, unknown>) & {
+    domain: AnyDomain
+    methodName: string
+}
+
+export type AnyAsyncCommand = AsyncCommand<any, any>
+
+export type CommandRun<Return = unknown> = Generator<CommandRequest, Return, unknown>
+
+export type AnyCommandRun = CommandRun<any>
+
+export type AsyncCommandRun<Return = unknown> = Generator<AsyncCommandRequest, Return, unknown>
+
+export type AnyAsyncCommandRun = AsyncCommandRun<any>
+
+export type Event<Args extends Serializable[], Return> = ((
+    ...args: Args
+) => Generator<EventRequest, Return, unknown>) & {
+    domain: AnyDomain
+    methodName: string
+}
+
+export type AnyEvent = Event<any, any>
+
+export type AsyncEvent<Args extends Serializable[], Return> = ((
+    ...args: Args
+) => Generator<AsyncEventRequest, Return, unknown>) & {
+    domain: AnyDomain
+    methodName: string
+}
+
+export type AnyAsyncEvent = AsyncEvent<any, any>
+
 export type EffectContext = {
     abortSignal: AbortSignal
     abortController: AbortController
 }
 
 /**
- * Context for a single command run. Provides time-dimension access:
- * - **Sequence**: `yield* waitFor(ctx.previous?.return)` — wait for previous run to finish.
- * - **Switch**: `ctx.previous?.abortController.abort()` — cancel previous run.
+ * AsyncCommandContext is double linked list of command contexts
+ * it is used to implement sequence and switch semantics
+ * it is active until the command completes, and it will remove itself from the list when the command completes
  */
-export type CommandContext<Args extends Serializable[] = Serializable[], T = unknown> = {
-    /** Arguments passed to this command invocation. */
-    args: Args
-    /** Resolves when this run completes (sync or async). Use for sequence: waitFor(ctx.previous?.return). */
-    return: Promise<T>
+export type AsyncCommandContext = {
+    /** Promise that resolves when the command completes. */
+    promise: Promise<void>
     /** Abort this run, or previous: ctx.previous?.abortController.abort() for switch semantics. */
     abortController: AbortController
-    /** Context of the previous invocation (same domain+method). Undefined on first run. */
-    previous?: CommandContext<Serializable[], unknown>
+    /** Previous running context at creation time (same domain+method). Undefined on first run. */
+    previous?: AsyncCommandContext
+    /** Next context in invocation order (later run). Undefined if this is the tail. */
+    next?: AsyncCommandContext
 }
 
-/** Helper namespace for command context types and semantics. */
-export const commandContext = {
-    /**
-     * Type helper for CommandContext when using yield* command.context().
-     * Example: const ctx = yield* command.context() as commandContext.Ctx<[string], string>
-     */
-    Ctx: undefined as unknown as new <Args extends Serializable[] = Serializable[], T = unknown>() => CommandContext<
-        Args,
-        T
-    >,
-}
-
-/** Internal: used by Store to resolve/reject ctx.return. */
-const COMMAND_CONTEXT_SETTLE = Symbol.for('koka-domain.commandContext.settle')
-export type CommandContextSettle = {
-    resolve: (value: unknown) => void
-    reject: (reason: unknown) => void
-}
-export type CommandContextWithSettle = CommandContext & { [COMMAND_CONTEXT_SETTLE]: CommandContextSettle }
-
-/** Effect 方法签名：由 @effect 装饰的方法 */
 export type EffectMethod<
     This,
     Args extends [] | [ctx: EffectContext],
@@ -347,6 +359,16 @@ export type EffectMethod<
 }
 
 export type AnyEffectMethod = EffectMethod<any, any, any>
+
+export type AsyncEffectMethod<
+    This,
+    Args extends [] | [ctx: EffectContext],
+    Request extends AsyncEffectRequest = AsyncEffectRequest,
+> = {
+    (this: This, ...args: Args): Generator<Request, void, unknown>
+}
+
+export type AnyAsyncEffectMethod = AsyncEffectMethod<any, any, any>
 
 export class Domain<StateType, Root> {
     readonly store: Store<Root>
@@ -563,8 +585,9 @@ export class Domain<StateType, Root> {
     static getAncestorDomains(domain: AnyDomain): AnyDomain[] {
         const ancestorSet = new Set<AnyDomain>()
         const queue: AnyDomain[] = [domain]
-        while (queue.length > 0) {
-            const current = queue.shift()!
+        let head = 0
+        while (head < queue.length) {
+            const current = queue[head++]
             if (ancestorSet.has(current)) {
                 continue
             }
@@ -572,6 +595,24 @@ export class Domain<StateType, Root> {
             for (const parent of Domain.getParentDomains(current)) {
                 queue.push(parent)
             }
+        }
+        // Cycle detection: parent graph must be a DAG
+        const visiting = new Set<AnyDomain>()
+        const visited = new Set<AnyDomain>()
+        function visit(node: AnyDomain): void {
+            if (visited.has(node)) return
+            if (visiting.has(node)) {
+                throw new Error('[koka-domain] getAncestorDomains: cycle detected in parent domain graph')
+            }
+            visiting.add(node)
+            for (const parent of Domain.getParentDomains(node)) {
+                if (ancestorSet.has(parent)) visit(parent)
+            }
+            visiting.delete(node)
+            visited.add(node)
+        }
+        for (const ancestor of ancestorSet) {
+            visit(ancestor)
         }
         const depths = new Map<string, number>()
         for (const ancestor of ancestorSet) {
@@ -599,6 +640,20 @@ export class Domain<StateType, Root> {
 // ---------------------------------------------------------------------------
 // Storage classes (class-based DomainStorage, QueryStorage, EffectStorage)
 // ---------------------------------------------------------------------------
+//
+// 内存与生命周期简要说明：
+// - DomainStorage: WeakMap<Domain, DomainStorage>，随 Domain 无引用时由 GC 回收。
+// - Store.domainCache / Domain.localDomainCache: 唯一强引用 Domain；removeDomainFromCache
+//   会从 cache 与父级 localDomainCache 移除，Domain 可被回收。
+// - QueryStorage: 存放在 DomainStorage.queryStorages（Map）。不订阅的 Query 也保留缓存，
+//   以保证 runQuery/getQueryResult 在 React 等场景下一致。Query 缓存仅随 domain result 的
+//   ok|err 变化自动失效：getAffectedDomainStoragesFromDiff 在 type 变化时 removeDomainAndSubtree，
+//   propagateFromAffectedDomainStorages 会重算受影响的 query。
+// - Store.destroy(): 会 clear domainCache、effectStorages、listeners、lastCommandContextByKey、
+//   eventSubscribers、pluginCleanup，避免 Store 被订阅/插件/事件闭包长期持有。
+// - genToMeta / effectMethodsStorage / getKeyFromPathCache / domainCtorIdMap 等为 WeakMap
+//   或按需创建，键可被 GC 时条目自动回收。
+//
 
 export class DomainStorage {
     readonly domain: AnyDomain
@@ -635,9 +690,8 @@ export class DomainStorage {
         if (this._result !== undefined && this._version === storeVersion) {
             return this._result as Result<any>
         }
-        if (this._result !== undefined && this._version !== storeVersion) {
-            this._result = undefined
-            this._version = undefined
+        if (this._result !== undefined) {
+            this.clearResult()
         }
         this._result = this.domain.store.get(this.domain)
         this._version = storeVersion
@@ -675,6 +729,7 @@ export class QueryStorage {
     readonly usedByQueries = new Map<string, QueryStorage>()
     readonly usedByEffects = new Map<string, EffectStorage>()
     readonly subscribers = new Set<(value: unknown) => unknown>()
+    readonly resultSubscribers = new Set<(result: Result<any>) => unknown>()
     private _result: Result<any> | undefined
     private _version: number | undefined
 
@@ -700,7 +755,7 @@ export class QueryStorage {
 
     static getOrCreate(domain: AnyDomain, query: AnyQuery, args: Serializable[], explicitKey?: string): QueryStorage {
         const domainStorage = DomainStorage.getOrCreate(domain)
-        const queryKey = explicitKey ?? `${query.methodName}(${JSON.stringify(args)})`
+        const queryKey = explicitKey ?? `${query.methodName}(${stableStringify(args)})`
         let queryStorage = domainStorage.queryStorages.get(queryKey)
         if (!queryStorage) {
             queryStorage = new QueryStorage(query, queryKey, args, domain, domainStorage)
@@ -721,9 +776,9 @@ export class EffectStorage {
     readonly domainDeps = new Map<string, DomainStorage>()
     readonly queryDeps = new Map<string, QueryStorage>()
     private _abortController: AbortController | null = null
-    readonly methods: AnyEffectMethod[]
+    readonly methods: RegisteredEffectMethod[]
 
-    constructor(domain: AnyDomain, key: string, methods: AnyEffectMethod[]) {
+    constructor(domain: AnyDomain, key: string, methods: RegisteredEffectMethod[]) {
         this.domain = domain
         this.key = key
         this.methods = methods
@@ -745,6 +800,9 @@ export class EffectStorage {
     removeFromUsedBy(): void {
         for (const domainStorage of this.domainDeps.values()) {
             domainStorage.usedByEffects.delete(this.key)
+            if (domainStorage.usedByQueries.size + domainStorage.usedByEffects.size === 0) {
+                domainStorage.domain.store.removeWatchedDomainStorage(domainStorage)
+            }
         }
         for (const queryStorage of this.queryDeps.values()) {
             queryStorage.usedByEffects.delete(this.key)
@@ -779,7 +837,7 @@ function topologicalSortDirty(storages: Set<QueryOrEffectStorage>): QueryOrEffec
             return
         }
         if (visiting.has(node)) {
-            return
+            throw new Error('[koka-domain] dependency cycle detected in query/effect graph')
         }
         visiting.add(node)
         for (const dep of getDeps(node)) {
@@ -954,141 +1012,23 @@ export type GenRunMeta = {
     domain: AnyDomain
     methodName: string
     args: Serializable[]
+    runnerMode: RunnerMode
     /** Query only: args -> cacheKey for incremental computation, set in @query decorator */
     cacheKey?: string
     /** Set when using @commandWithContext: context for this run (sequence/switch semantics). */
     commandContext?: CommandContextWithSettle
 }
 
-const genToMeta = new WeakMap<Generator<GenRequest, unknown, unknown>, GenRunMeta>()
+type DomainYield = GenRequest | Async.Async
 
-export function getGenRunMeta(gen: Generator<GenRequest, unknown, unknown>): GenRunMeta | undefined {
+const genToMeta = new WeakMap<Generator<DomainYield, unknown, unknown>, GenRunMeta>()
+
+export function getGenRunMeta(gen: Generator<DomainYield, unknown, unknown>): GenRunMeta | undefined {
     return genToMeta.get(gen)
 }
 
-function registerGen(gen: Generator<GenRequest, unknown, unknown>, meta: GenRunMeta): void {
+function registerGen(gen: Generator<DomainYield, unknown, unknown>, meta: GenRunMeta): void {
     genToMeta.set(gen, meta)
-}
-
-type FiberState<Root> = {
-    gen: Generator<GenRequest, unknown, unknown>
-    stack: Array<{ gen: Generator<GenRequest, unknown, unknown>; sendValue: unknown }>
-    sendValue: unknown
-}
-
-function runFiberUntilWaitOrDone<Root>(
-    store: Store<Root>,
-    fiber: FiberState<Root>,
-): { done: unknown } | { wait: Promise<unknown>; state: FiberState<Root> } {
-    let current = fiber.gen
-    let sendValue = fiber.sendValue
-    const stack = [...fiber.stack]
-
-    for (;;) {
-        const step = current.next(sendValue)
-        if (step.done) {
-            const returnValue = step.value
-            if (stack.length === 0) {
-                const meta = genToMeta.get(current)
-                meta?.commandContext?.[COMMAND_CONTEXT_SETTLE]?.resolve(returnValue)
-                return { done: returnValue }
-            }
-            const prev = stack.pop()!
-            current = prev.gen
-            sendValue = returnValue
-            continue
-        }
-        const yielded = step.value
-        if (
-            yielded &&
-            typeof (yielded as unknown as Generator).next === 'function' &&
-            genToMeta.has(yielded as unknown as Generator<GenRequest, unknown, unknown>)
-        ) {
-            const subGen = yielded as unknown as Generator<GenRequest, unknown, unknown>
-            stack.push({ gen: current, sendValue })
-            current = subGen
-            sendValue = undefined
-            continue
-        }
-        const req = yielded as GenRequest
-        if (req.type === 'get') {
-            const result = DomainStorage.getDomainResult(req.domain)
-            if (result.type === 'err') return { done: undefined }
-            sendValue = result.value
-            continue
-        }
-        if (req.type === 'getResult') {
-            sendValue = DomainStorage.getDomainResult(req.domain)
-            continue
-        }
-        if (req.type === 'set') {
-            const res = store.set(req.domain as Domain<unknown, Root>, req.setStateInput as SetStateInput<unknown>)
-            if (res !== null && typeof res === 'object' && (res as Result<unknown>).type === 'err')
-                return { done: undefined }
-            sendValue = res
-            continue
-        }
-        if (req.type === 'emit') {
-            store.emitEvent(req.event)
-            sendValue = undefined
-            continue
-        }
-        if (req.type === 'wait') {
-            fiber.gen = current
-            fiber.stack = stack
-            fiber.sendValue = sendValue
-            return { wait: req.promise, state: fiber }
-        }
-        if (req.type === 'all') {
-            throw new Error('[koka-domain] all() cannot be nested inside all()')
-        }
-        if (req.type === 'getCommandContext') {
-            const meta = genToMeta.get(current)
-            if (!meta) {
-                throw new Error('[koka-domain] getCommandContext only valid inside a command run')
-            }
-            if (!meta.commandContext) {
-                meta.commandContext = store.createCommandContext(meta.domain, meta.methodName, meta.args)
-            }
-            sendValue = meta.commandContext
-            continue
-        }
-        req as never satisfies never
-        throw new Error('[koka-domain] runFiberUntilWaitOrDone: unknown request')
-    }
-}
-
-function runAllParallel<Root>(
-    store: Store<Root>,
-    generators: Generator<GenRequest, unknown, unknown>[],
-): Promise<unknown[]> {
-    const fibers: (FiberState<Root> | null)[] = generators.map((gen) => ({ gen, stack: [], sendValue: undefined }))
-    const results: unknown[] = new Array(generators.length)
-
-    function step(): Promise<unknown[]> {
-        const waits: { fiber: FiberState<Root>; promise: Promise<unknown> }[] = []
-        for (let i = 0; i < fibers.length; i++) {
-            const fiber = fibers[i]
-            if (fiber === null) continue
-            const r = runFiberUntilWaitOrDone(store, fiber)
-            if ('done' in r) {
-                results[i] = r.done
-                fibers[i] = null
-            } else {
-                waits.push({ fiber: r.state, promise: r.wait })
-            }
-        }
-        if (waits.length > 0) {
-            return Promise.all(waits.map((w) => w.promise)).then((values) => {
-                waits.forEach((w, idx) => {
-                    w.fiber.sendValue = values[idx]
-                })
-                return step()
-            })
-        }
-        return Promise.resolve(results)
-    }
-    return step()
 }
 
 type RunGeneratorCallbacks = {
@@ -1098,426 +1038,401 @@ type RunGeneratorCallbacks = {
     commandMeta?: GenRunMeta
 }
 
-function runGenerator<Root>(
+function addDomainDep(
+    domainStorage: DomainStorage,
+    currentQueryStorage: QueryStorage | null,
+    currentEffectStorage: EffectStorage | null,
+): void {
+    if (currentQueryStorage) {
+        currentQueryStorage.domainDeps.set(domainStorage.domain.key, domainStorage)
+        domainStorage.usedByQueries.set(currentQueryStorage.key, currentQueryStorage)
+    }
+    if (currentEffectStorage) {
+        currentEffectStorage.domainDeps.set(domainStorage.domain.key, domainStorage)
+        domainStorage.usedByEffects.set(currentEffectStorage.key, currentEffectStorage)
+    }
+    if (currentQueryStorage || currentEffectStorage) {
+        domainStorage.domain.store.addWatchedDomainStorage(domainStorage)
+    }
+}
+
+function addQueryDep(
+    subStorage: QueryStorage,
+    currentQueryStorage: QueryStorage | null,
+    currentEffectStorage: EffectStorage | null,
+): void {
+    if (currentQueryStorage) {
+        currentQueryStorage.queryDeps.set(subStorage.key, subStorage)
+        subStorage.usedByQueries.set(currentQueryStorage.key, currentQueryStorage)
+    }
+    if (currentEffectStorage) {
+        currentEffectStorage.queryDeps.set(subStorage.key, subStorage)
+        subStorage.usedByEffects.set(currentEffectStorage.key, currentEffectStorage)
+    }
+}
+
+/** 单次 GenRequest 处理结果：供 runner 共用 */
+type ProcessRequestOutcome =
+    | { tag: 'value'; sendValue: unknown }
+    | { tag: 'wait'; promise: Promise<unknown> }
+    | { tag: 'effectReturn' }
+    | { tag: 'throw'; error: unknown }
+
+/** yielded 解析结果：区分 subGen 与 GenRequest */
+type YieldedParsed =
+    | { tag: 'subGen'; subGen: Generator<DomainYield, unknown, unknown>; meta: GenRunMeta }
+    | { tag: 'request'; request: GenRequest | Async.Async }
+
+function processYielded(yielded: unknown): YieldedParsed {
+    if (
+        yielded &&
+        typeof (yielded as unknown as Generator).next === 'function' &&
+        genToMeta.has(yielded as unknown as Generator<DomainYield, unknown, unknown>)
+    ) {
+        const subGen = yielded as unknown as Generator<DomainYield, unknown, unknown>
+        const meta = genToMeta.get(subGen)!
+        return { tag: 'subGen', subGen, meta }
+    }
+    return { tag: 'request', request: yielded as GenRequest | Async.Async }
+}
+
+function processGenRequest<Root>(
     store: Store<Root>,
-    gen: Generator<GenRequest, unknown, unknown>,
+    req: GenRequest | Async.Async,
+    ctx: {
+        currentQueryStorage: QueryStorage | null
+        currentEffectStorage: EffectStorage | null
+        commandMeta?: GenRunMeta
+    },
+): ProcessRequestOutcome {
+    const { currentQueryStorage, currentEffectStorage, commandMeta } = ctx
+    if (req.type === 'async') {
+        return { tag: 'wait', promise: req.promise }
+    }
+    if (req.type === 'get') {
+        const domainStorage = DomainStorage.getOrCreate(req.domain)
+        addDomainDep(domainStorage, currentQueryStorage, currentEffectStorage)
+        const result = DomainStorage.getDomainResult(req.domain)
+        if (result.type === 'err') {
+            if (currentEffectStorage) return { tag: 'effectReturn' }
+            return { tag: 'throw', error: result.error }
+        }
+        return { tag: 'value', sendValue: result.value }
+    }
+    if (req.type === 'getResult') {
+        const domainStorage = DomainStorage.getOrCreate(req.domain)
+        addDomainDep(domainStorage, currentQueryStorage, currentEffectStorage)
+        const res = DomainStorage.getDomainResult(req.domain)
+        if (
+            currentEffectStorage &&
+            res !== null &&
+            typeof res === 'object' &&
+            (res as Result<unknown>).type === 'err'
+        ) {
+            return { tag: 'effectReturn' }
+        }
+        return { tag: 'value', sendValue: res }
+    }
+    if (req.type === 'set') {
+        const sendValue = store.set(req.domain as Domain<unknown, Root>, req.setStateInput as SetStateInput<unknown>)
+        if (
+            currentEffectStorage &&
+            sendValue !== null &&
+            typeof sendValue === 'object' &&
+            (sendValue as Result<unknown>).type === 'err'
+        ) {
+            return { tag: 'effectReturn' }
+        }
+        return { tag: 'value', sendValue }
+    }
+    if (req.type === 'emit') {
+        store.emitEvent(req.event)
+        return { tag: 'value', sendValue: undefined }
+    }
+    if (req.type === 'getCommandContext') {
+        if (!commandMeta?.commandContext) {
+            throw new Error('[koka-domain] getCommandContext only valid inside a command run')
+        }
+        return { tag: 'value', sendValue: commandMeta.commandContext }
+    }
+    throw new Error('[koka-domain] processGenRequest: unknown request')
+}
+
+const RUNNER_MAX_ITERATIONS = 100_000
+
+const EFFECT_RETURN = Symbol('koka-domain.effectReturn')
+
+type RunExecContext<Root> = {
+    currentQueryStorage: QueryStorage | null
+    currentEffectStorage: EffectStorage | null
+    commandMeta?: GenRunMeta
+    activeQueries: Set<QueryStorage>
+}
+
+function resolveSubQueryStorage<Root>(
+    store: Store<Root>,
+    currentQueryStorage: QueryStorage | null,
+    currentEffectStorage: EffectStorage | null,
+    subGen: Generator<DomainYield, unknown, unknown>,
+    meta: GenRunMeta,
+):
+    | { kind: 'cachedValue'; value: unknown }
+    | { kind: 'cachedError'; error: unknown }
+    | { kind: 'run'; storage: QueryStorage | null } {
+    const queryRef = (meta.domain as any)[meta.methodName] as AnyQuery | undefined
+    if (!queryRef) {
+        return { kind: 'run', storage: null }
+    }
+    const subStorage = QueryStorage.getOrCreate(meta.domain, queryRef, meta.args, meta.cacheKey)
+    if (subStorage !== currentQueryStorage) {
+        addQueryDep(subStorage, currentQueryStorage, currentEffectStorage)
+    }
+    if (subStorage.result !== undefined && subStorage.version === store.version) {
+        if (subStorage.result.type === 'ok') {
+            return { kind: 'cachedValue', value: subStorage.result.value }
+        }
+        if (subStorage.result.type === 'err') {
+            return { kind: 'cachedError', error: subStorage.result.error }
+        }
+    }
+    void subGen
+    return { kind: 'run', storage: subStorage }
+}
+
+function isRegisteredSubGenerator(yielded: unknown): yielded is Generator<DomainYield, unknown, unknown> {
+    return (
+        !!yielded &&
+        typeof (yielded as Generator).next === 'function' &&
+        genToMeta.has(yielded as Generator<DomainYield, unknown, unknown>)
+    )
+}
+
+function isRegisteredSubGenerator(yielded: unknown): yielded is Generator<DomainYield, unknown, unknown> {
+    return (
+        !!yielded &&
+        typeof (yielded as Generator).next === 'function' &&
+        genToMeta.has(yielded as Generator<DomainYield, unknown, unknown>)
+    )
+}
+
+function* executeDomainGenerator<Root>(
+    store: Store<Root>,
+    gen: Generator<DomainYield, unknown, unknown>,
+    ctx: RunExecContext<Root>,
+): Generator<Async.Async, unknown | typeof EFFECT_RETURN, unknown> {
+    let iterations = 0
+    let sendValue: unknown = undefined
+    let throwReason: { error: unknown } | undefined = undefined
+    for (;;) {
+        if (++iterations > RUNNER_MAX_ITERATIONS) {
+            throw new Error('[koka-domain] executeDomainGenerator: max iterations exceeded (possible infinite loop)')
+        }
+        let step: IteratorResult<DomainYield, unknown>
+        try {
+            if (throwReason !== undefined) {
+                const err = throwReason.error
+                throwReason = undefined
+                step = gen.throw(err)
+            } else {
+                step = gen.next(sendValue)
+            }
+        } catch (e) {
+            if (ctx.currentQueryStorage) {
+                ctx.currentQueryStorage.result = Accessor.err(e instanceof Error ? e.message : String(e)) as Result<any>
+                ctx.currentQueryStorage.version = store.version
+            }
+            throw e
+        }
+        if (step.done) {
+            return step.value
+        }
+
+        const yielded = step.value
+        if (isRegisteredSubGenerator(yielded)) {
+            const subGen = yielded
+            const subMeta = genToMeta.get(subGen)!
+            const queryRef = (subMeta.domain as any)[subMeta.methodName] as AnyQuery | undefined
+            let subStorage: QueryStorage | null = null
+            if (queryRef) {
+                subStorage = QueryStorage.getOrCreate(subMeta.domain, queryRef, subMeta.args, subMeta.cacheKey)
+                if (subStorage !== ctx.currentQueryStorage) {
+                    addQueryDep(subStorage, ctx.currentQueryStorage, ctx.currentEffectStorage)
+                }
+                if (subStorage.result !== undefined && subStorage.version === store.version) {
+                    if (subStorage.result.type === 'ok') {
+                        sendValue = subStorage.result.value
+                        throwReason = undefined
+                        continue
+                    }
+                    if (subStorage.result.type === 'err') {
+                        sendValue = undefined
+                        throwReason = { error: subStorage.result.error }
+                        continue
+                    }
+                }
+            }
+            if (subStorage) {
+                if (ctx.activeQueries.has(subStorage)) {
+                    throw new Error('[koka-domain] re-entrant query not allowed')
+                }
+                ctx.activeQueries.add(subStorage)
+            }
+            try {
+                const subRet = yield* executeDomainGenerator(store, subGen, {
+                    ...ctx,
+                    currentQueryStorage: subStorage,
+                })
+                if (subRet === EFFECT_RETURN) {
+                    return EFFECT_RETURN
+                }
+                sendValue = subRet
+                throwReason = undefined
+            } catch (e) {
+                sendValue = undefined
+                throwReason = { error: e }
+            } finally {
+                if (subStorage) {
+                    ctx.activeQueries.delete(subStorage)
+                }
+            }
+            continue
+        }
+        const req = yielded as GenRequest | Async.Async
+        if (req.type === 'async') {
+            try {
+                const value = yield* KokaAsync.await(req.promise)
+                sendValue = value
+                throwReason = undefined
+            } catch (reason) {
+                sendValue = undefined
+                throwReason = { error: reason }
+            }
+            continue
+        }
+        if (req.type === 'get') {
+            const domainStorage = DomainStorage.getOrCreate(req.domain)
+            addDomainDep(domainStorage, ctx.currentQueryStorage, ctx.currentEffectStorage)
+            const result = DomainStorage.getDomainResult(req.domain)
+            if (result.type === 'err') {
+                if (ctx.currentEffectStorage) {
+                    return EFFECT_RETURN
+                }
+                sendValue = undefined
+                throwReason = { error: result.error }
+                continue
+            }
+            sendValue = result.value
+            throwReason = undefined
+            continue
+        }
+        if (req.type === 'getResult') {
+            const domainStorage = DomainStorage.getOrCreate(req.domain)
+            addDomainDep(domainStorage, ctx.currentQueryStorage, ctx.currentEffectStorage)
+            const res = DomainStorage.getDomainResult(req.domain)
+            if (
+                ctx.currentEffectStorage &&
+                res !== null &&
+                typeof res === 'object' &&
+                (res as Result<unknown>).type === 'err'
+            ) {
+                return EFFECT_RETURN
+            }
+            sendValue = res
+            throwReason = undefined
+            continue
+        }
+        if (req.type === 'set') {
+            const result = store.set(req.domain as Domain<unknown, Root>, req.setStateInput as SetStateInput<unknown>)
+            if (
+                ctx.currentEffectStorage &&
+                result !== null &&
+                typeof result === 'object' &&
+                (result as Result<unknown>).type === 'err'
+            ) {
+                return EFFECT_RETURN
+            }
+            sendValue = result
+            throwReason = undefined
+            continue
+        }
+        if (req.type === 'emit') {
+            store.emitEvent(req.event)
+            sendValue = undefined
+            throwReason = undefined
+            continue
+        }
+        if (req.type === 'getCommandContext') {
+            if (!ctx.commandMeta?.commandContext) {
+                sendValue = undefined
+                throwReason = { error: new Error('[koka-domain] getCommandContext only valid inside a command run') }
+                continue
+            }
+            sendValue = ctx.commandMeta.commandContext
+            throwReason = undefined
+            continue
+        }
+        sendValue = undefined
+        throwReason = { error: new Error('[koka-domain] executeDomainGenerator: unknown request') }
+    }
+}
+
+/** 轻量执行器：去掉 RunState，最大化交给 generator/koka 的控制流 */
+function* runGeneratorEffector<Root>(
+    store: Store<Root>,
+    gen: Generator<DomainYield, unknown, unknown>,
+    queryStorage: QueryStorage | null,
+    effectStorage: EffectStorage | null,
+    callbacks?: RunGeneratorCallbacks,
+): Generator<Async.Async, unknown, unknown> {
+    const { onComplete, onError, commandMeta } = callbacks ?? {}
+    const activeQueries = new Set<QueryStorage>()
+    if (queryStorage) {
+        activeQueries.add(queryStorage)
+    }
+    try {
+        const ret = yield* executeDomainGenerator(store, gen, {
+            currentQueryStorage: queryStorage,
+            currentEffectStorage: effectStorage,
+            commandMeta,
+            activeQueries,
+        })
+        if (ret === EFFECT_RETURN) {
+            return undefined
+        }
+        if (queryStorage) {
+            queryStorage.result = Accessor.ok(ret) as Result<any>
+            queryStorage.version = store.version
+        }
+        onComplete?.(ret)
+        return ret
+    } catch (e) {
+        if (queryStorage) {
+            queryStorage.result = Accessor.err(e instanceof Error ? e.message : String(e)) as Result<any>
+            queryStorage.version = store.version
+        }
+        onError?.(e)
+        throw e
+    }
+}
+
+function runGeneratorSync<Root>(
+    store: Store<Root>,
+    gen: Generator<DomainYield, unknown, unknown>,
     queryStorage: QueryStorage | null,
     effectStorage: EffectStorage | null = null,
     callbacks?: RunGeneratorCallbacks,
 ): unknown {
-    let sendValue: unknown = undefined
-    let current: Generator<GenRequest, unknown, unknown> = gen
-    let currentQueryStorage: QueryStorage | null = queryStorage
-    let currentEffectStorage: EffectStorage | null = effectStorage
-    const stack: Array<{
-        gen: Generator<GenRequest, unknown, unknown>
-        queryStorage: QueryStorage | null
-        effectStorage: EffectStorage | null
-    }> = []
-    const { onComplete, onError, commandMeta } = callbacks ?? {}
-
-    for (;;) {
-        const step = current.next(sendValue)
-        if (step.done) {
-            const returnValue = step.value
-            if (stack.length === 0) {
-                if (currentQueryStorage) {
-                    currentQueryStorage.result = Accessor.ok(returnValue) as Result<any>
-                    currentQueryStorage.version = store.version
-                }
-                onComplete?.(returnValue)
-                return returnValue
-            }
-            const prev = stack.pop()!
-            current = prev.gen
-            currentQueryStorage = prev.queryStorage
-            currentEffectStorage = prev.effectStorage
-            sendValue = returnValue
-            continue
-        }
-        const yielded = step.value
-        if (
-            yielded &&
-            typeof (yielded as unknown as Generator).next === 'function' &&
-            genToMeta.has(yielded as unknown as Generator<GenRequest, unknown, unknown>)
-        ) {
-            const subGen = yielded as unknown as Generator<GenRequest, unknown, unknown>
-            const meta = genToMeta.get(subGen)!
-            const queryRef = (meta.domain as any)[meta.methodName] as AnyQuery | undefined
-            let subStorage: QueryStorage | null = null
-            if (queryRef) {
-                subStorage = QueryStorage.getOrCreate(meta.domain, queryRef, meta.args, meta.cacheKey)
-                if (currentQueryStorage) {
-                    currentQueryStorage.queryDeps.set(subStorage.key, subStorage)
-                    subStorage.usedByQueries.set(currentQueryStorage.key, currentQueryStorage)
-                }
-                if (currentEffectStorage) {
-                    currentEffectStorage.queryDeps.set(subStorage.key, subStorage)
-                    subStorage.usedByEffects.set(currentEffectStorage.key, currentEffectStorage)
-                }
-                if (
-                    subStorage.result !== undefined &&
-                    subStorage.version === store.version &&
-                    subStorage.result.type === 'ok'
-                ) {
-                    sendValue = subStorage.result.value
-                    continue
-                }
-            }
-            stack.push({ gen: current, queryStorage: currentQueryStorage, effectStorage: currentEffectStorage })
-            current = subGen
-            currentQueryStorage = subStorage
-            sendValue = undefined
-            continue
-        }
-        const req = yielded as GenRequest
-        if (req.type === 'get') {
-            const domainStorage = DomainStorage.getOrCreate(req.domain)
-            if (currentQueryStorage) {
-                currentQueryStorage.domainDeps.set(domainStorage.domain.key, domainStorage)
-                domainStorage.usedByQueries.set(currentQueryStorage.key, currentQueryStorage)
-            }
-            if (currentEffectStorage) {
-                currentEffectStorage.domainDeps.set(domainStorage.domain.key, domainStorage)
-                domainStorage.usedByEffects.set(currentEffectStorage.key, currentEffectStorage)
-            }
-            const result = DomainStorage.getDomainResult(req.domain)
-            if (result.type === 'err') {
-                if (currentEffectStorage) return
-                throw result.error
-            }
-            sendValue = result.value
-        } else if (req.type === 'getResult') {
-            const domainStorage = DomainStorage.getOrCreate(req.domain)
-            if (currentQueryStorage) {
-                currentQueryStorage.domainDeps.set(domainStorage.domain.key, domainStorage)
-                domainStorage.usedByQueries.set(currentQueryStorage.key, currentQueryStorage)
-            }
-            if (currentEffectStorage) {
-                currentEffectStorage.domainDeps.set(domainStorage.domain.key, domainStorage)
-                domainStorage.usedByEffects.set(currentEffectStorage.key, currentEffectStorage)
-            }
-            sendValue = DomainStorage.getDomainResult(req.domain)
-        } else if (req.type === 'set') {
-            sendValue = store.set(req.domain as Domain<unknown, Root>, req.setStateInput as SetStateInput<unknown>)
-            if (
-                currentEffectStorage &&
-                sendValue !== null &&
-                typeof sendValue === 'object' &&
-                (sendValue as Result<unknown>).type === 'err'
-            ) {
-                return
-            }
-        } else if (req.type === 'emit') {
-            store.emitEvent(req.event)
-            sendValue = undefined
-        } else if (req.type === 'wait') {
-            req.promise.then(
-                (value) => {
-                    runGeneratorStep(
-                        store,
-                        current,
-                        value,
-                        stack,
-                        currentQueryStorage,
-                        currentEffectStorage,
-                        undefined,
-                        callbacks,
-                    )
-                },
-                (reason) => {
-                    runGeneratorStep(
-                        store,
-                        current,
-                        undefined,
-                        stack,
-                        currentQueryStorage,
-                        currentEffectStorage,
-                        reason,
-                        callbacks,
-                    )
-                },
-            )
-            return
-        } else if (req.type === 'all') {
-            runAllParallel(store, req.generators).then((results) => {
-                runGeneratorStep(
-                    store,
-                    current,
-                    results,
-                    stack,
-                    currentQueryStorage,
-                    currentEffectStorage,
-                    undefined,
-                    callbacks,
-                )
-            })
-            return
-        } else if (req.type === 'getCommandContext') {
-            if (!commandMeta) {
-                throw new Error('[koka-domain] getCommandContext only valid inside a command run')
-            }
-            if (!commandMeta.commandContext) {
-                commandMeta.commandContext = store.createCommandContext(
-                    commandMeta.domain,
-                    commandMeta.methodName,
-                    commandMeta.args,
-                )
-            }
-            sendValue = commandMeta.commandContext
-            continue
-        } else {
-            req as never satisfies never
-            throw new Error('[koka-domain] runGenerator: unknown request')
-        }
-    }
+    return kokaRunSync(runGeneratorEffector(store, gen, queryStorage, effectStorage ?? null, callbacks) as any)
 }
 
-function runGeneratorStep<Root>(
+async function runGeneratorAsync<Root>(
     store: Store<Root>,
-    current: Generator<GenRequest, unknown, unknown>,
-    sendValue: unknown,
-    stack: Array<{
-        gen: Generator<GenRequest, unknown, unknown>
-        queryStorage: QueryStorage | null
-        effectStorage: EffectStorage | null
-    }>,
-    currentQueryStorage: QueryStorage | null,
-    currentEffectStorage: EffectStorage | null,
-    throwReason?: unknown,
+    gen: Generator<DomainYield, unknown, unknown>,
+    queryStorage: QueryStorage | null,
+    effectStorage: EffectStorage | null = null,
     callbacks?: RunGeneratorCallbacks,
-): void {
-    const { onComplete, onError } = callbacks ?? {}
-    let step: IteratorResult<GenRequest, unknown>
-    if (throwReason !== undefined) {
-        try {
-            step = current.throw(throwReason)
-        } catch (e) {
-            if (stack.length === 0) {
-                onError?.(e)
-                throw e
-            }
-            const prev = stack.pop()!
-            runGeneratorStep(store, prev.gen, e, stack, prev.queryStorage, prev.effectStorage, e, callbacks)
-            return
-        }
-    } else {
-        step = current.next(sendValue)
-    }
-    if (step.done) {
-        const returnValue = step.value
-        if (stack.length === 0) {
-            if (currentQueryStorage) {
-                currentQueryStorage.result = Accessor.ok(returnValue) as Result<any>
-                currentQueryStorage.version = store.version
-            }
-            onComplete?.(returnValue)
-            return
-        }
-        const prev = stack.pop()!
-        runGeneratorStep(
-            store,
-            prev.gen,
-            returnValue,
-            stack,
-            prev.queryStorage,
-            prev.effectStorage,
-            undefined,
-            callbacks,
-        )
-        return
-    }
-    const yielded = step.value
-    if (
-        yielded &&
-        typeof (yielded as unknown as Generator).next === 'function' &&
-        genToMeta.has(yielded as unknown as Generator<GenRequest, unknown, unknown>)
-    ) {
-        const subGen = yielded as unknown as Generator<GenRequest, unknown, unknown>
-        const meta = genToMeta.get(subGen)!
-        const queryRef = (meta.domain as any)[meta.methodName] as AnyQuery | undefined
-        let subStorage: QueryStorage | null = null
-        if (queryRef) {
-            subStorage = QueryStorage.getOrCreate(meta.domain, queryRef, meta.args, meta.cacheKey)
-            if (currentQueryStorage) {
-                currentQueryStorage.queryDeps.set(subStorage.key, subStorage)
-                subStorage.usedByQueries.set(currentQueryStorage.key, currentQueryStorage)
-            }
-            if (currentEffectStorage) {
-                currentEffectStorage.queryDeps.set(subStorage.key, subStorage)
-                subStorage.usedByEffects.set(currentEffectStorage.key, currentEffectStorage)
-            }
-            if (
-                subStorage.result !== undefined &&
-                subStorage.version === store.version &&
-                subStorage.result.type === 'ok'
-            ) {
-                runGeneratorStep(
-                    store,
-                    current,
-                    subStorage.result.value,
-                    stack,
-                    currentQueryStorage,
-                    currentEffectStorage,
-                )
-                return
-            }
-        }
-        stack.push({ gen: current, queryStorage: currentQueryStorage, effectStorage: currentEffectStorage })
-        runGeneratorStep(store, subGen, undefined, stack, subStorage, currentEffectStorage, undefined, callbacks)
-        return
-    }
-    const req = yielded as GenRequest
-    if (req.type === 'get') {
-        const domainStorage = DomainStorage.getOrCreate(req.domain)
-        if (currentQueryStorage) {
-            currentQueryStorage.domainDeps.set(domainStorage.domain.key, domainStorage)
-            domainStorage.usedByQueries.set(currentQueryStorage.key, currentQueryStorage)
-        }
-        if (currentEffectStorage) {
-            currentEffectStorage.domainDeps.set(domainStorage.domain.key, domainStorage)
-            domainStorage.usedByEffects.set(currentEffectStorage.key, currentEffectStorage)
-        }
-        const result = DomainStorage.getDomainResult(req.domain)
-        if (result.type === 'err') {
-            if (currentEffectStorage) return
-            throw result.error
-        }
-        runGeneratorStep(
-            store,
-            current,
-            result.value,
-            stack,
-            currentQueryStorage,
-            currentEffectStorage,
-            undefined,
-            callbacks,
-        )
-        return
-    }
-    if (req.type === 'getResult') {
-        const domainStorage = DomainStorage.getOrCreate(req.domain)
-        if (currentQueryStorage) {
-            currentQueryStorage.domainDeps.set(domainStorage.domain.key, domainStorage)
-            domainStorage.usedByQueries.set(currentQueryStorage.key, currentQueryStorage)
-        }
-        if (currentEffectStorage) {
-            currentEffectStorage.domainDeps.set(domainStorage.domain.key, domainStorage)
-            domainStorage.usedByEffects.set(currentEffectStorage.key, currentEffectStorage)
-        }
-        const res = DomainStorage.getDomainResult(req.domain)
-        if (res !== null && typeof res === 'object' && (res as Result<unknown>).type === 'err') {
-            if (currentEffectStorage) return
-        }
-        runGeneratorStep(store, current, res, stack, currentQueryStorage, currentEffectStorage, undefined, callbacks)
-        return
-    }
-    if (req.type === 'set') {
-        const newSendValue = store.set(req.domain as Domain<unknown, Root>, req.setStateInput as SetStateInput<unknown>)
-        if (
-            currentEffectStorage &&
-            newSendValue !== null &&
-            typeof newSendValue === 'object' &&
-            (newSendValue as Result<unknown>).type === 'err'
-        ) {
-            return
-        }
-        runGeneratorStep(
-            store,
-            current,
-            newSendValue,
-            stack,
-            currentQueryStorage,
-            currentEffectStorage,
-            undefined,
-            callbacks,
-        )
-        return
-    }
-    if (req.type === 'emit') {
-        store.emitEvent(req.event)
-        runGeneratorStep(
-            store,
-            current,
-            undefined,
-            stack,
-            currentQueryStorage,
-            currentEffectStorage,
-            undefined,
-            callbacks,
-        )
-        return
-    }
-    if (req.type === 'wait') {
-        req.promise.then(
-            (value) => {
-                runGeneratorStep(
-                    store,
-                    current,
-                    value,
-                    stack,
-                    currentQueryStorage,
-                    currentEffectStorage,
-                    undefined,
-                    callbacks,
-                )
-            },
-            (reason) => {
-                runGeneratorStep(
-                    store,
-                    current,
-                    undefined,
-                    stack,
-                    currentQueryStorage,
-                    currentEffectStorage,
-                    reason,
-                    callbacks,
-                )
-            },
-        )
-        return
-    }
-    if (req.type === 'all') {
-        runAllParallel(store, req.generators).then((results) => {
-            runGeneratorStep(
-                store,
-                current,
-                results,
-                stack,
-                currentQueryStorage,
-                currentEffectStorage,
-                undefined,
-                callbacks,
-            )
-        })
-        return
-    }
-    if (req.type === 'getCommandContext') {
-        const { commandMeta } = callbacks ?? {}
-        if (!commandMeta) {
-            throw new Error('[koka-domain] getCommandContext only valid inside a command run')
-        }
-        if (!commandMeta.commandContext) {
-            commandMeta.commandContext = store.createCommandContext(
-                commandMeta.domain,
-                commandMeta.methodName,
-                commandMeta.args,
-            )
-        }
-        runGeneratorStep(
-            store,
-            current,
-            commandMeta.commandContext,
-            stack,
-            currentQueryStorage,
-            currentEffectStorage,
-            undefined,
-            callbacks,
-        )
-        return
-    }
-    req as never satisfies never
-    throw new Error('[koka-domain] runGenerator: unknown request')
+): Promise<unknown> {
+    return await kokaRunAsync(runGeneratorEffector(store, gen, queryStorage, effectStorage ?? null, callbacks))
 }
 
 // ---------------------------------------------------------------------------
@@ -1525,14 +1440,14 @@ function runGeneratorStep<Root>(
 // ---------------------------------------------------------------------------
 
 export function* get<State, Root = any>(domain: Domain<State, Root>): Generator<GenGetRequest, State, unknown> {
-    const state = yield { type: 'get', domain: domain as AnyDomain }
+    const state = yield { type: 'get', domain: domain }
     return state as State
 }
 
 export function* getResult<State, Root = any>(
     domain: Domain<State, Root>,
 ): Generator<GenGetResultRequest, Result<State>, unknown> {
-    const result = yield { type: 'getResult', domain: domain as AnyDomain }
+    const result = yield { type: 'getResult', domain: domain }
     return result as Result<State>
 }
 
@@ -1540,7 +1455,7 @@ export function* set<State, Root = any>(
     domain: Domain<State, Root>,
     setStateInput: SetStateInput<State>,
 ): Generator<GenSetRequest, Result<Root>, unknown> {
-    const result = yield { type: 'set', domain: domain as AnyDomain, setStateInput }
+    const result = yield { type: 'set', domain: domain, setStateInput }
     return result as Result<Root>
 }
 
@@ -1548,38 +1463,11 @@ export function* emit<E extends AnyEvent>(event: E): Generator<GenEmitRequest, v
     yield { type: 'emit', event }
 }
 
-/**
- * Suspend effect execution until the given promise resolves or rejects. Only use inside @effect.
- * Resolves: returns the resolved value (runner calls gen.next(value)). Rejects: runner calls gen.throw(reason), so try/catch works.
- */
-export function* waitFor<T extends Promise<any> | undefined>(
-    promise: T,
-): Generator<GenWaitRequest, Awaited<T>, unknown> {
-    if (promise == undefined) {
-        return undefined as Awaited<T>
-    }
+/** Async suspend helper moved to koka/async: use `yield* Async.await(promise)` instead of waitFor. */
 
-    if (promise instanceof Promise) {
-        const value = yield { type: 'wait', promise }
-        return value as Awaited<T>
-    }
+const effectMethodsStorage = new WeakMap<new (...args: any[]) => any, Map<string, RegisteredEffectMethod>>()
 
-    return promise as Awaited<T>
-}
-
-/**
- * Run multiple command/effect generators in parallel. Wait requests are collected each "frame"
- * and Promise.all'd before resuming all fibers, so e.g. multiple removeTodo() animations
- * advance in lockstep. Returns array of return values.
- */
-export function* all<T>(generators: Generator<GenRequest, T, unknown>[]): Generator<GenAllRequest, T[], unknown> {
-    const results = yield { type: 'all', generators: generators as Generator<GenRequest, unknown, unknown>[] }
-    return results as T[]
-}
-
-const effectMethodsStorage = new WeakMap<new (...args: any[]) => any, Map<string, AnyEffectMethod>>()
-
-const getEffectfulMethods = (domain: AnyDomain): Map<string, AnyEffectMethod> | undefined => {
+const getEffectfulMethods = (domain: AnyDomain): Map<string, RegisteredEffectMethod> | undefined => {
     return effectMethodsStorage.get(domain.constructor as new (...args: any[]) => any)
 }
 
@@ -1620,7 +1508,6 @@ export class Store<Root> implements IStore<Root> {
             return () => {
                 const index = this.pluginCleanup.indexOf(cleanup)
                 if (index !== -1) {
-                    const cleanup = this.pluginCleanup[index]
                     this.pluginCleanup.splice(index, 1)
                     cleanup()
                 }
@@ -1629,33 +1516,35 @@ export class Store<Root> implements IStore<Root> {
         return () => {}
     }
 
-    /**
-     * Create command context for a run (used by @commandWithContext). Sets ctx.previous from last run.
-     * Caller must settle ctx via COMMAND_CONTEXT_SETTLE when the run completes or throws.
-     */
     createCommandContext<Args extends Serializable[], T = unknown>(
         domain: AnyDomain,
         methodName: string,
         args: Args,
-    ): CommandContextWithSettle & CommandContext<Args, T> {
+    ): CommandContextWithSettle & AsyncCommandContext<Args, T> {
         const key = commandContextKey(domain, methodName)
-        const previous = this.lastCommandContextByKey.get(key) as CommandContext<Serializable[], unknown> | undefined
-        let resolve!: (value: unknown) => void
-        let reject!: (reason: unknown) => void
-        const returnPromise = new Promise<T>((res, rej) => {
-            resolve = (v: unknown) => res(v as T)
-            reject = rej
-        })
-        const abortController = new AbortController()
-        const ctx = {
-            args,
-            return: returnPromise,
-            abortController,
-            previous,
-            [COMMAND_CONTEXT_SETTLE]: { resolve, reject },
-        } as CommandContextWithSettle & CommandContext<Args, T>
+        const previous = this.lastCommandContextByKey.get(key) as AsyncCommandContext | undefined
+        const ctx = new AsyncCommandContextImpl(this, domain, methodName, args, previous) as CommandContextWithSettle &
+            AsyncCommandContext<Args, T>
+        if (previous) (previous as AsyncCommandContextImpl).next = ctx
         this.lastCommandContextByKey.set(key, ctx)
         return ctx
+    }
+
+    /** Called when a context's return promise is settled (from CommandContextImpl). Retreats last to nearest running. */
+    onCommandContextEnd(ctx: CommandContextWithSettle, domain: AnyDomain, methodName: string): void {
+        const key = commandContextKey(domain, methodName)
+        ;(ctx as AsyncCommandContextImpl).running = false
+        if (this.lastCommandContextByKey.get(key) !== ctx) return
+        let previous: AsyncCommandContext | undefined = ctx.previous
+        while (previous) {
+            if (previous.running) {
+                this.lastCommandContextByKey.set(key, previous as CommandContextWithSettle)
+                previous.next = undefined
+                return
+            }
+            previous = previous.previous
+        }
+        this.lastCommandContextByKey.delete(key)
     }
 
     getState() {
@@ -1669,9 +1558,16 @@ export class Store<Root> implements IStore<Root> {
         this.state = state
         this.dirty = true
         this.version += 1
-        const currentVersion = this.version
+        if (this._inPublish) {
+            return
+        }
+        if (this._publishScheduled) {
+            return
+        }
+        this._publishScheduled = true
         this.promise = Promise.resolve().then(() => {
-            if (currentVersion === this.version) {
+            this._publishScheduled = false
+            if (this.dirty) {
                 this.publish()
             }
         })
@@ -1716,6 +1612,9 @@ export class Store<Root> implements IStore<Root> {
     }
 
     private dirty = false
+    private _publishScheduled = false
+    private _inPublish = false
+    private _publishRoundCount = 0
     version = 0
     promise = Promise.resolve()
 
@@ -1736,30 +1635,46 @@ export class Store<Root> implements IStore<Root> {
         if (!this.dirty) {
             return
         }
+        this._publishRoundCount += 1
+        if (this._publishRoundCount > 100) {
+            this.dirty = false
+            this._publishRoundCount = 0
+            return
+        }
         this.dirty = false
+        this._inPublish = true
+        try {
+            this.publishImpl()
+        } finally {
+            this._inPublish = false
+            if (!this.dirty) {
+                this._publishRoundCount = 0
+            } else if (!this._publishScheduled) {
+                this._publishScheduled = true
+                this.promise = Promise.resolve().then(() => {
+                    this._publishScheduled = false
+                    if (this.dirty) this.publish()
+                })
+            }
+        }
+    }
 
+    private publishImpl(): void {
         const affectedDomainStorages = this.getAffectedDomainStoragesFromDiff()
 
         if (affectedDomainStorages.size > 0) {
             this.propagateFromAffectedDomainStorages(affectedDomainStorages)
         }
 
-        for (const listener of this.listeners) {
+        for (const listener of [...this.listeners]) {
             listener(this.state)
         }
     }
 
     private getAffectedDomainStoragesFromDiff(): Set<DomainStorage> {
         const affected = new Set<DomainStorage>()
-        const domains = Array.from(this.domainCache.values())
-
-        for (const domain of domains) {
-            const key = getDomainCacheKey(domain.constructor as typeof Domain<any, Root>, domain.path)
-            if (!this.domainCache.has(key)) {
-                continue
-            }
-
-            const domainStorage = DomainStorage.getOrCreate(domain)
+        for (const domainStorage of this.watchedDomainStorages) {
+            const domain = domainStorage.domain
             const cached = domainStorage.result
             const current = Accessor.get(this.state, domain.accessor)
 
@@ -1779,7 +1694,6 @@ export class Store<Root> implements IStore<Root> {
                 affected.add(domainStorage)
             }
         }
-
         return affected
     }
 
@@ -1837,19 +1751,21 @@ export class Store<Root> implements IStore<Root> {
                     continue
                 }
 
-                const oldReturn = queryStorage.result?.type === 'ok' ? queryStorage.result.value : undefined
+                const oldResult = queryStorage.result
                 queryStorage.result = undefined
                 queryStorage.version = undefined
                 try {
                     const gen = queryStorage.query.call(queryStorage.query.domain, ...queryStorage.args) as AnyQueryRun
-                    this.runQuery(gen)
+                    this.runQuerySync(gen)
                 } catch (_) {
                     // query 抛错（如 errorQuery 在 filter !== 'done' 时），不加入 toNotify，避免打断 publish
                     continue
                 }
                 const resultAfter = queryStorage.result as Result<any> | undefined
-                const newReturn = resultAfter?.type === 'ok' ? resultAfter.value : undefined
-                if (newReturn !== undefined && !shallowEqual(oldReturn, newReturn)) {
+                const resultChanged =
+                    resultAfter !== undefined &&
+                    (oldResult === undefined || !shallowEqualResult(oldResult, resultAfter))
+                if (resultChanged) {
                     changed.add(queryStorage)
                     toNotify.add(queryStorage)
                 }
@@ -1859,9 +1775,15 @@ export class Store<Root> implements IStore<Root> {
         }
 
         for (const queryStorage of toNotify) {
-            const value = queryStorage.result?.type === 'ok' ? queryStorage.result.value : undefined
+            const result = queryStorage.result
+            const value = result?.type === 'ok' ? result.value : undefined
             for (const subscriber of queryStorage.subscribers) {
                 subscriber(value)
+            }
+            if (result !== undefined) {
+                for (const resultSubscriber of queryStorage.resultSubscribers) {
+                    resultSubscriber(result)
+                }
             }
         }
     }
@@ -1871,6 +1793,8 @@ export class Store<Root> implements IStore<Root> {
     destroy(): void {
         this.abortController.abort()
         this.listeners = []
+        this.lastCommandContextByKey.clear()
+        this.eventSubscribers.clear()
 
         for (const cleanup of this.pluginCleanup) {
             cleanup()
@@ -1878,6 +1802,7 @@ export class Store<Root> implements IStore<Root> {
 
         this.pluginCleanup = []
         this.domainCache.clear()
+        this.watchedDomainStorages.clear()
 
         for (const effectStorage of this.effectStorages.values()) {
             effectStorage.abort()
@@ -1888,6 +1813,17 @@ export class Store<Root> implements IStore<Root> {
     }
 
     private domainCache = new Map<string, Domain<any, Root>>()
+    /** Domain storages that have at least one query/effect dependent; used for O(watched) publish diff instead of O(domains). */
+    private watchedDomainStorages = new Set<DomainStorage>()
+
+    /** Internal: keep watched set in sync when deps are added (called from addDomainDep). */
+    addWatchedDomainStorage(domainStorage: DomainStorage): void {
+        this.watchedDomainStorages.add(domainStorage)
+    }
+    /** Internal: keep watched set in sync when deps are removed (called from removeFromUsedBy / runQuery clear). */
+    removeWatchedDomainStorage(domainStorage: DomainStorage): void {
+        this.watchedDomainStorages.delete(domainStorage)
+    }
 
     private effectRefCount = new Map<string, number>()
     private effectStorages = new Map<string, EffectStorage>()
@@ -1959,8 +1895,15 @@ export class Store<Root> implements IStore<Root> {
         }
         try {
             const domain = effectStorage.domain
-            for (const method of effectStorage.methods) {
-                runGenerator(this, method.call(domain, effectContext), null, effectStorage)
+            for (const registered of effectStorage.methods) {
+                const gen = registered.method.call(domain, effectContext) as Generator<DomainYield, unknown, unknown>
+                if (registered.mode === 'async') {
+                    void runGeneratorAsync(this, gen, null, effectStorage).catch(() => {
+                        // Single effect run failure; avoid breaking publish
+                    })
+                } else {
+                    runGeneratorSync(this, gen, null, effectStorage)
+                }
             }
         } catch (_) {
             // Single effect run failure; avoid breaking publish
@@ -1984,11 +1927,32 @@ export class Store<Root> implements IStore<Root> {
         }
     }
 
-    runQuery<Return = unknown>(gen: QueryRun<Return>): Return {
+    private resetQueryStorage(queryStorage: QueryStorage): void {
+        if (queryStorage.result !== undefined) {
+            queryStorage.result = undefined
+            queryStorage.version = undefined
+            for (const domainStorage of queryStorage.domainDeps.values()) {
+                domainStorage.clearResult()
+            }
+        }
+        for (const domainStorage of queryStorage.domainDeps.values()) {
+            domainStorage.usedByQueries.delete(queryStorage.key)
+            if (domainStorage.usedByQueries.size + domainStorage.usedByEffects.size === 0) {
+                domainStorage.domain.store.removeWatchedDomainStorage(domainStorage)
+            }
+        }
+        for (const queryDepStorage of queryStorage.queryDeps.values()) {
+            queryDepStorage.usedByQueries.delete(queryStorage.key)
+        }
+        queryStorage.domainDeps.clear()
+        queryStorage.queryDeps.clear()
+    }
+
+    runQuerySync<Return = unknown>(gen: QueryRun<Return>): Return {
         const store = this
-        const meta = genToMeta.get(gen as Generator<GenRequest, unknown, unknown>)
+        const meta = genToMeta.get(gen as Generator<DomainYield, unknown, unknown>)
         if (!meta) {
-            throw new Error('[koka-domain] runQuery: generator not registered')
+            throw new Error('[koka-domain] runQuerySync: generator not registered')
         }
         const queryRef = (meta.domain as any)[meta.methodName] as AnyQuery
         const queryStorage = QueryStorage.getOrCreate(meta.domain, queryRef, meta.args, meta.cacheKey)
@@ -1999,23 +1963,9 @@ export class Store<Root> implements IStore<Root> {
             }
             return queryStorage.result.value
         }
-        if (queryStorage.result !== undefined) {
-            queryStorage.result = undefined
-            queryStorage.version = undefined
-            for (const domainStorage of queryStorage.domainDeps.values()) {
-                domainStorage.clearResult()
-            }
-        }
-        for (const domainStorage of queryStorage.domainDeps.values()) {
-            domainStorage.usedByQueries.delete(queryStorage.key)
-        }
-        for (const queryDepStorage of queryStorage.queryDeps.values()) {
-            queryDepStorage.usedByQueries.delete(queryStorage.key)
-        }
-        queryStorage.domainDeps.clear()
-        queryStorage.queryDeps.clear()
+        this.resetQueryStorage(queryStorage)
 
-        runGenerator(store, gen, queryStorage)
+        runGeneratorSync(store, gen, queryStorage)
         const res = queryStorage.result as Result<Return> | undefined
         if (res === undefined) {
             return undefined as Return
@@ -2026,8 +1976,46 @@ export class Store<Root> implements IStore<Root> {
         throw res.error
     }
 
+    async runQueryAsync<Return = unknown>(gen: QueryRun<Return>): Promise<Return> {
+        const store = this
+        const meta = genToMeta.get(gen as Generator<DomainYield, unknown, unknown>)
+        if (!meta) {
+            throw new Error('[koka-domain] runQueryAsync: generator not registered')
+        }
+        const queryRef = (meta.domain as any)[meta.methodName] as AnyQuery
+        const queryStorage = QueryStorage.getOrCreate(meta.domain, queryRef, meta.args, meta.cacheKey)
+
+        if (queryStorage.result !== undefined && queryStorage.version === store.version) {
+            if (queryStorage.result.type === 'err') {
+                throw queryStorage.result.error
+            }
+            return queryStorage.result.value as Return
+        }
+
+        this.resetQueryStorage(queryStorage)
+        await runGeneratorAsync(store, gen, queryStorage)
+
+        const res = queryStorage.result as Result<Return> | undefined
+        if (res === undefined) {
+            return undefined as Return
+        }
+        if (res.type === 'ok') {
+            return res.value as Return
+        }
+        throw res.error
+    }
+
+    runQuery<Return = unknown>(gen: QueryRun<Return>): Return {
+        const meta = genToMeta.get(gen as Generator<DomainYield, unknown, unknown>)
+        if (!meta) {
+            throw new Error('[koka-domain] runQuery: generator not registered')
+        }
+        // Legacy sync entrypoint; async queries should use runQueryAsync explicitly.
+        return this.runQuerySync(gen)
+    }
+
     getQueryResult<Return = unknown>(gen: QueryRun<Return>): Result<Return> {
-        const meta = genToMeta.get(gen as Generator<GenRequest, unknown, unknown>)
+        const meta = genToMeta.get(gen as Generator<DomainYield, unknown, unknown>)
         if (!meta) {
             throw new Error('[koka-domain] getQueryResult: generator not registered')
         }
@@ -2037,7 +2025,7 @@ export class Store<Root> implements IStore<Root> {
             return queryStorage.result as Result<Return>
         }
         try {
-            this.runQuery(gen)
+            this.runQuerySync(gen)
             return queryStorage.result as Result<Return>
         } catch (error) {
             const message = error instanceof Error ? error.message : String(error)
@@ -2045,40 +2033,79 @@ export class Store<Root> implements IStore<Root> {
         }
     }
 
-    subscribeQuery<Return = unknown>(gen: QueryRun<Return>): (subscriber: (value: Return) => unknown) => () => void {
-        const meta = genToMeta.get(gen as Generator<GenRequest, unknown, unknown>)
+    subscribeQuery<Return = unknown>(gen: QueryRun<Return>, subscriber: (value: Return) => unknown): () => void {
+        const meta = genToMeta.get(gen as Generator<DomainYield, unknown, unknown>)
         if (!meta) {
             throw new Error('[koka-domain] subscribeQuery: generator not registered')
         }
         const queryRef = (meta.domain as any)[meta.methodName] as AnyQuery
         const queryStorage = QueryStorage.getOrCreate(meta.domain, queryRef, meta.args, meta.cacheKey)
-        const store = this
-
-        return (subscriber: (value: Return) => unknown) => {
-            if (queryStorage.subscribers.size === 0) {
-                store.refDomainAndAncestors(meta.domain)
+        const totalBefore = queryStorage.subscribers.size + queryStorage.resultSubscribers.size
+        if (totalBefore === 0) {
+            this.refDomainAndAncestors(meta.domain)
+            if (meta.runnerMode === 'async') {
+                void this.runQueryAsync(gen).catch(() => {
+                    // ignore
+                })
+            } else {
                 try {
-                    store.runQuery(gen)
+                    this.runQuerySync(gen)
                 } catch (_) {
                     // ignore
                 }
             }
-            queryStorage.subscribers.add(subscriber as (value: unknown) => unknown)
-
-            return () => {
-                queryStorage.subscribers.delete(subscriber as (value: unknown) => unknown)
-                if (queryStorage.subscribers.size === 0) {
-                    store.unrefDomainAndAncestors(meta.domain)
-                }
+        }
+        queryStorage.subscribers.add(subscriber as (value: unknown) => unknown)
+        return () => {
+            queryStorage.subscribers.delete(subscriber as (value: unknown) => unknown)
+            if (queryStorage.subscribers.size + queryStorage.resultSubscribers.size === 0) {
+                this.unrefDomainAndAncestors(meta.domain)
             }
         }
     }
 
-    runCommand<Return = unknown>(gen: Generator<CommandRequest, Return, unknown>): Return {
-        const meta = genToMeta.get(gen as Generator<GenRequest, unknown, unknown>)
+    subscribeQueryResult<Return = unknown>(
+        gen: QueryRun<Return>,
+        subscriber: (result: Result<Return>) => unknown,
+    ): () => void {
+        const meta = genToMeta.get(gen as Generator<DomainYield, unknown, unknown>)
         if (!meta) {
-            throw new Error('[koka-domain] runCommand: generator not registered')
+            throw new Error('[koka-domain] subscribeQueryResult: generator not registered')
         }
+        const queryRef = (meta.domain as any)[meta.methodName] as AnyQuery
+        const queryStorage = QueryStorage.getOrCreate(meta.domain, queryRef, meta.args, meta.cacheKey)
+        const totalBefore = queryStorage.subscribers.size + queryStorage.resultSubscribers.size
+        if (totalBefore === 0) {
+            this.refDomainAndAncestors(meta.domain)
+            if (meta.runnerMode === 'async') {
+                void this.runQueryAsync(gen).catch(() => {
+                    // ignore
+                })
+            } else {
+                try {
+                    this.runQuerySync(gen)
+                } catch (_) {
+                    // ignore
+                }
+            }
+        }
+        queryStorage.resultSubscribers.add(subscriber as (result: Result<any>) => unknown)
+        return () => {
+            queryStorage.resultSubscribers.delete(subscriber as (result: Result<any>) => unknown)
+            if (queryStorage.subscribers.size + queryStorage.resultSubscribers.size === 0) {
+                this.unrefDomainAndAncestors(meta.domain)
+            }
+        }
+    }
+
+    runCommandSync<Return = unknown>(gen: Generator<CommandRequest | Async.Async, Return, unknown>): Return {
+        const meta = genToMeta.get(gen as Generator<DomainYield, unknown, unknown>)
+        if (!meta) {
+            throw new Error('[koka-domain] runCommandSync: generator not registered')
+        }
+        // Create context at invocation time so list order = command method invocation order;
+        // this gen will read it whenever it yields getCommandContext (e.g. after waitFor).
+        meta.commandContext = this.createCommandContext(meta.domain, meta.methodName, meta.args)
         const callbacks: RunGeneratorCallbacks = {
             commandMeta: meta,
             onComplete(value) {
@@ -2089,12 +2116,59 @@ export class Store<Root> implements IStore<Root> {
             },
         }
         try {
-            const result = runGenerator(this, gen as Generator<GenRequest, unknown, unknown>, null, null, callbacks)
+            const result = runGeneratorSync(
+                this,
+                gen as Generator<DomainYield, unknown, unknown>,
+                null,
+                null,
+                callbacks,
+            )
             return result as Return
         } catch (e) {
             meta.commandContext?.[COMMAND_CONTEXT_SETTLE]?.reject(e)
             throw e
         }
+    }
+
+    async runCommandAsync<Return = unknown>(
+        gen: Generator<CommandRequest | Async.Async, Return, unknown>,
+    ): Promise<Return> {
+        const meta = genToMeta.get(gen as Generator<DomainYield, unknown, unknown>)
+        if (!meta) {
+            throw new Error('[koka-domain] runCommandAsync: generator not registered')
+        }
+        meta.commandContext = this.createCommandContext(meta.domain, meta.methodName, meta.args)
+        const callbacks: RunGeneratorCallbacks = {
+            commandMeta: meta,
+            onComplete(value) {
+                meta.commandContext?.[COMMAND_CONTEXT_SETTLE]?.resolve(value)
+            },
+            onError(reason) {
+                meta.commandContext?.[COMMAND_CONTEXT_SETTLE]?.reject(reason)
+            },
+        }
+        try {
+            const result = await runGeneratorAsync(
+                this,
+                gen as Generator<DomainYield, unknown, unknown>,
+                null,
+                null,
+                callbacks,
+            )
+            return result as Return
+        } catch (e) {
+            meta.commandContext?.[COMMAND_CONTEXT_SETTLE]?.reject(e)
+            throw e
+        }
+    }
+
+    runCommand<Return = unknown>(gen: Generator<CommandRequest | Async.Async, Return, unknown>): Return {
+        const meta = genToMeta.get(gen as Generator<DomainYield, unknown, unknown>)
+        if (!meta) {
+            throw new Error('[koka-domain] runCommand: generator not registered')
+        }
+        // Legacy sync entrypoint; async commands should use runCommandAsync explicitly.
+        return this.runCommandSync(gen)
     }
 
     emitEvent<E extends AnyEvent>(event: E): void {
@@ -2103,8 +2177,16 @@ export class Store<Root> implements IStore<Root> {
             return
         }
         const payload = event.payload
-        for (const handler of eventSubscribers) {
-            runGenerator(this, handler(payload), null)
+        for (const handler of [...eventSubscribers]) {
+            const gen = handler(payload) as Generator<DomainYield, unknown, unknown>
+            const meta = genToMeta.get(gen)
+            if (meta?.runnerMode === 'async') {
+                void runGeneratorAsync(this, gen, null).catch(() => {
+                    // Event handlers are best-effort and should not break emit flow.
+                })
+            } else {
+                runGeneratorSync(this, gen, null)
+            }
         }
     }
 
@@ -2127,7 +2209,9 @@ export class Store<Root> implements IStore<Root> {
             for (const parent of Domain.getParentDomains(domain)) {
                 parent.removeDerivedFromCache(key)
             }
-            DomainStorage.getOrCreate(domain).clearResult()
+            const domainStorage = DomainStorage.getOrCreate(domain)
+            domainStorage.clearResult()
+            this.removeWatchedDomainStorage(domainStorage)
         }
         return deleted
     }
@@ -2173,57 +2257,74 @@ export function Event<const Name extends string>(name: Name) {
     }
 }
 
-export function event<ES extends AnyEventCtor[], Request extends EventRequest>(...Events: ES) {
-    return function <This>(
-        target: (this: This, event: EventValue<InstanceType<ES[number]>>) => Generator<Request, void, unknown>,
-        context: KokaClassMethodDecoratorContext<This, typeof target>,
-    ): typeof target {
-        context.addInitializer(function (this: This) {
-            if (!(this instanceof Domain)) {
-                throw new Error('Event must be used on a Domain class')
-            }
-            const store = (this as AnyDomain).store
-            const domain = this as AnyDomain
-            for (const EventCtor of Events) {
-                const handler = (payload: EventValue<InstanceType<typeof EventCtor>>) => {
-                    const gen = (
-                        target as (
-                            this: AnyDomain,
-                            event: EventValue<InstanceType<typeof EventCtor>>,
-                        ) => Generator<Request, void, unknown>
-                    ).call(domain, payload)
-                    registerGen(gen as Generator<GenRequest, unknown, unknown>, {
-                        domain,
-                        methodName: context.name,
-                        args: [payload] as Serializable[],
-                    })
-                    return gen
+function createEventDecorator(mode: RunnerMode) {
+    return function eventDecorator<ES extends AnyEventCtor[], Request extends EventRequest | Async.Async>(
+        ...Events: ES
+    ) {
+        return function <This>(
+            target: (this: This, event: EventValue<InstanceType<ES[number]>>) => Generator<Request, void, unknown>,
+            context: KokaClassMethodDecoratorContext<This, typeof target>,
+        ): typeof target {
+            context.addInitializer(function (this: This) {
+                if (!(this instanceof Domain)) {
+                    throw new Error('Event must be used on a Domain class')
                 }
-                store.subscribeEvent(EventCtor, handler as EventHandler<typeof EventCtor>)
-            }
-        })
-
-        return target
+                const store = this.store
+                const domain = this
+                for (const EventCtor of Events) {
+                    const handler = (payload: EventValue<InstanceType<typeof EventCtor>>) => {
+                        const gen = (
+                            target as (
+                                this: AnyDomain,
+                                event: EventValue<InstanceType<typeof EventCtor>>,
+                            ) => Generator<Request, void, unknown>
+                        ).call(domain, payload)
+                        registerGen(gen as Generator<DomainYield, unknown, unknown>, {
+                            domain,
+                            methodName: context.name,
+                            args: [payload] as Serializable[],
+                            runnerMode: mode,
+                        })
+                        return gen
+                    }
+                    store.subscribeEvent(EventCtor, handler as EventHandler<typeof EventCtor>)
+                }
+            })
+            return target
+        }
     }
 }
 
-export function query() {
-    return function <This, Request extends QueryRequest, Return, Args extends Serializable[], Root = any>(
+export const event = Object.assign(createEventDecorator('sync'), {
+    sync: createEventDecorator('sync'),
+    async: createEventDecorator('async'),
+})
+
+function createQueryDecorator(mode: RunnerMode) {
+    return function queryDecorator<
+        This,
+        Request extends QueryRequest | Async.Async,
+        Return,
+        Args extends Serializable[],
+        Root = any,
+    >(
         target: (this: This, ...args: Args) => Generator<Request, Return, unknown>,
         context: KokaClassMethodDecoratorContext<This, typeof target>,
     ): typeof target {
         const methodName = context.name
         function wrapper(this: any, ...args: Args) {
             const argsSer = args as Serializable[]
-            const cacheKey = `${methodName}(${JSON.stringify(argsSer)})`
-            const gen = target.call(this, ...args) as Generator<Request, unknown, unknown>
-            registerGen(gen as Generator<GenRequest, unknown, unknown>, {
-                domain: this as AnyDomain,
+            const cacheKey = `${methodName}(${stableStringify(argsSer)})`
+            const meta: GenRunMeta = {
+                domain: this,
                 methodName,
                 args: argsSer,
                 cacheKey,
-            })
-            return gen
+                runnerMode: mode,
+            }
+            const gen = target.call(this, ...args) as Generator<Request, unknown, unknown>
+            registerGen(gen as Generator<DomainYield, unknown, unknown>, meta)
+            return gen as Return
         }
         context.addInitializer(function (this: This) {
             ;(this as any)[methodName] = wrapper.bind(this)
@@ -2231,72 +2332,109 @@ export function query() {
             bound.domain = this
             bound.methodName = methodName
         })
-        return wrapper as typeof target
+        return wrapper as unknown as typeof target
     }
 }
 
+export const query = Object.assign(
+    function query() {
+        return createQueryDecorator('sync')
+    },
+    {
+        sync: () => createQueryDecorator('sync'),
+        async: () => createQueryDecorator('async'),
+    },
+)
+
 /** Generator helper: yield* command.context() inside a @command to get current run's context (no extra args). */
-function* commandContextGenerator(): Generator<GenGetCommandContextRequest, CommandContext, unknown> {
+function* commandContextGenerator(): Generator<GenGetCommandContextRequest, AsyncCommandContext, unknown> {
     const ctx = yield { type: 'getCommandContext' }
-    return ctx as CommandContext
+    return ctx as AsyncCommandContext
+}
+
+function createCommandDecorator(mode: RunnerMode) {
+    return function commandDecorator<
+        This,
+        Args extends Serializable[],
+        Request extends CommandRequest | Async.Async,
+        Return,
+        Root = any,
+    >(
+        target: (this: This, ...args: Args) => Generator<Request, Return, unknown>,
+        context: KokaClassMethodDecoratorContext<This, typeof target>,
+    ): typeof target {
+        const methodName = context.name
+        function wrapper(this: any, ...args: Args) {
+            const meta: GenRunMeta = {
+                domain: this as AnyDomain,
+                methodName,
+                args: args as Serializable[],
+                runnerMode: mode,
+            }
+            const gen = target.call(this, ...args) as Generator<Request, unknown, unknown>
+            registerGen(gen as Generator<DomainYield, unknown, unknown>, meta)
+            return gen
+        }
+        context.addInitializer(function (this: This) {
+            if (!(this instanceof Domain)) {
+                throw new Error('Command must be used on a Domain class')
+            }
+            ;(this as any)[methodName] = wrapper.bind(this)
+            const bound = (this as any)[methodName]
+            bound.domain = this
+            bound.methodName = methodName
+        })
+        return wrapper as unknown as typeof target
+    }
 }
 
 export const command = Object.assign(
     function command() {
-        return function <This, Args extends Serializable[], Request extends CommandRequest, Return, Root = any>(
-            target: (this: This, ...args: Args) => Generator<Request, Return, unknown>,
-            context: KokaClassMethodDecoratorContext<This, typeof target>,
-        ): typeof target {
-            const methodName = context.name
-            function wrapper(this: any, ...args: Args) {
-                const gen = target.call(this, ...args) as Generator<Request, unknown, unknown>
-                registerGen(gen as Generator<GenRequest, unknown, unknown>, {
-                    domain: this as AnyDomain,
-                    methodName,
-                    args: args as Serializable[],
-                })
-                return gen
-            }
-            context.addInitializer(function (this: This) {
-                if (!(this instanceof Domain)) {
-                    throw new Error('Command must be used on a Domain class')
-                }
-                ;(this as any)[methodName] = wrapper.bind(this)
-                const bound = (this as any)[methodName]
-                bound.domain = this
-                bound.methodName = methodName
-            })
-            return wrapper as typeof target
-        }
+        return createCommandDecorator('sync')
     },
     {
-        /** Inside a @command: yield* command.context() for ctx (args, return, abortController, previous). Sequence: waitFor(ctx.previous?.return); Switch: ctx.previous?.abortController.abort(). */
+        sync: () => createCommandDecorator('sync'),
+        async: () => createCommandDecorator('async'),
+        /** Inside a @command: yield* command.context() for ctx (args, return, abortController, previous). Sequence: yield* Async.await(ctx.previous?.return); Switch: ctx.previous?.abortController.abort(). */
         context: commandContextGenerator,
     },
 )
 
-export function effect() {
-    return function <This, Args extends [] | [ctx: EffectContext], Request extends EffectRequest>(
+function createEffectDecorator(mode: RunnerMode) {
+    return function effectDecorator<
+        This,
+        Args extends [] | [ctx: EffectContext],
+        Request extends EffectRequest | Async.Async,
+    >(
         target: EffectMethod<This, Args, Request>,
         context: KokaClassMethodDecoratorContext<This, typeof target>,
     ): typeof target {
         const methodName = String(context.name)
-
         context.addInitializer(function (this: This) {
             const DomainCtor = (this as AnyDomain).constructor as new (...args: any[]) => any
-
             let methods = effectMethodsStorage.get(DomainCtor)
             if (!methods) {
                 methods = new Map()
                 effectMethodsStorage.set(DomainCtor, methods)
             }
-
-            methods.set(methodName, target as EffectMethod<This, Args, Request>)
+            methods.set(methodName, {
+                mode,
+                method: target as EffectMethod<This, Args, Request>,
+            })
         })
-
         return target
     }
 }
+
+export const effect = Object.assign(
+    function effect() {
+        return createEffectDecorator('sync')
+    },
+    {
+        sync: () => createEffectDecorator('sync'),
+        async: () => createEffectDecorator('async'),
+    },
+)
 
 export function getDomainState<State, Root = any>(domain: Domain<State, Root>): State {
     const result = DomainStorage.getDomainResult(domain)
@@ -2341,7 +2479,7 @@ export function subscribeQueryState<Return = unknown>(
     if (!meta) {
         throw new Error('[koka-domain] subscribeQueryState: generator not registered')
     }
-    return meta.domain.store.subscribeQuery(gen)(subscriber as (value: unknown) => unknown)
+    return meta.domain.store.subscribeQuery(gen, subscriber as (value: unknown) => unknown)
 }
 
 export function subscribeQueryResult<Return = unknown>(
@@ -2352,9 +2490,7 @@ export function subscribeQueryResult<Return = unknown>(
     if (!meta) {
         throw new Error('[koka-domain] subscribeQueryResult: generator not registered')
     }
-    return meta.domain.store.subscribeQuery(gen)(((value: unknown) => {
-        subscriber(Accessor.ok(value) as Result<Return>)
-    }) as (value: unknown) => unknown)
+    return meta.domain.store.subscribeQueryResult(gen, subscriber as (result: Result<any>) => unknown)
 }
 
 export function getQueryResult<Return = unknown>(gen: QueryRun<Return>): Result<Return> {
@@ -2373,20 +2509,10 @@ export function getQueryState<Return = unknown>(gen: QueryRun<Return>): Return {
     return result.value
 }
 
-/** Run a bound query generator (defensive: throws if generator is not registered). */
-export function runQuery<Return = unknown>(gen: QueryRun<Return>): Return {
-    const meta = genToMeta.get(gen as Generator<GenRequest, unknown, unknown>)
-    if (!meta) {
-        throw new Error('[koka-domain] runQuery: generator not registered (bound generator required)')
-    }
-    return meta.domain.store.runQuery(gen) as Return
-}
+export function runQuery<Return = unknown>(gen: QueryRun<Return>): Return {}
 
-/** Run a bound command generator (defensive: throws if generator is not registered). */
-export function runCommand<Return = unknown>(gen: Generator<CommandRequest, Return, unknown>): Return {
-    const meta = genToMeta.get(gen as Generator<GenRequest, unknown, unknown>)
-    if (!meta) {
-        throw new Error('[koka-domain] runCommand: generator not registered (bound generator required)')
-    }
-    return meta.domain.store.runCommand(gen) as Return
-}
+export function runCommand<Return = unknown>(gen: CommandRun<Return>): Return {}
+
+export function runQueryAsync<Return = unknown>(gen: AsyncQueryRun<Return>): Promise<Return> {}
+
+export function runCommandAsync<Return = unknown>(gen: AsyncCommandRun<Return>): Promise<Return> {}

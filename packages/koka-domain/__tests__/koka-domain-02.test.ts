@@ -29,14 +29,14 @@ type DomainErrResult = { type: 'err'; name: 'DomainErr'; error: string }
 
 class UserStorageDomain<Root extends RootState> extends Domain<Root['users'], Root> {
     @query()
-    *getUser(id: string): Generator<unknown, UserEntity | DomainErrResult, unknown> {
+    *getUser(id: string) {
         const users = yield* get(this)
         if (id in users) return users[id]
         return { type: 'err', name: 'DomainErr', error: `User ${id} not found` }
     }
 
     @command()
-    *addUser(user: UserEntity): Generator<unknown, void | DomainErrResult, unknown> {
+    *addUser(user: UserEntity) {
         const users = yield* get(this)
         if (user.id in users) {
             return { type: 'err', name: 'DomainErr', error: `User ${user.id} exists` }
@@ -45,7 +45,7 @@ class UserStorageDomain<Root extends RootState> extends Domain<Root['users'], Ro
     }
 
     @command()
-    *addOrder(userId: string, orderId: string): Generator<unknown, void | DomainErrResult, unknown> {
+    *addOrder(userId: string, orderId: string) {
         const userResult = (yield* (this as any).getUser(userId)) as UserEntity | DomainErrResult
         if (typeof userResult === 'object' && 'type' in userResult && userResult.type === 'err') return userResult
         const user = userResult as UserEntity
@@ -59,14 +59,14 @@ class UserStorageDomain<Root extends RootState> extends Domain<Root['users'], Ro
 
 class OrderStorageDomain<Root extends RootState> extends Domain<Root['orders'], Root> {
     @query()
-    *getOrder(id: string): Generator<unknown, OrderEntity | DomainErrResult, unknown> {
+    *getOrder(id: string) {
         const orders = yield* get(this)
         if (id in orders) return orders[id]
         return { type: 'err', name: 'DomainErr', error: `Order ${id} not found` }
     }
 
     @command()
-    *addOrder(order: OrderEntity): Generator<unknown, void | DomainErrResult, unknown> {
+    *addOrder(order: OrderEntity) {
         const orders = yield* get(this)
         if (order.id in orders) {
             return { type: 'err', name: 'DomainErr', error: `Order ${order.id} exists` }
@@ -75,7 +75,7 @@ class OrderStorageDomain<Root extends RootState> extends Domain<Root['orders'], 
     }
 
     @command()
-    *addProduct(orderId: string, productId: string): Generator<unknown, void | DomainErrResult, unknown> {
+    *addProduct(orderId: string, productId: string) {
         const orderResult = (yield* (this as any).getOrder(orderId)) as OrderEntity | DomainErrResult
         if (typeof orderResult === 'object' && 'type' in orderResult && orderResult.type === 'err') return orderResult
         const order = orderResult as OrderEntity
@@ -89,14 +89,14 @@ class OrderStorageDomain<Root extends RootState> extends Domain<Root['orders'], 
 
 class ProductStorageDomain<Root extends RootState> extends Domain<Root['products'], Root> {
     @query()
-    *getProduct(id: string): Generator<unknown, ProductEntity | DomainErrResult, unknown> {
+    *getProduct(id: string) {
         const products = yield* get(this)
         if (id in products) return products[id]
         return { type: 'err', name: 'DomainErr', error: `Product ${id} not found` }
     }
 
     @command()
-    *addProduct(product: ProductEntity): Generator<unknown, void | DomainErrResult, unknown> {
+    *addProduct(product: ProductEntity) {
         const products = yield* get(this)
         if (product.id in products) {
             return { type: 'err', name: 'DomainErr', error: `Product ${product.id} exists` }
@@ -105,7 +105,7 @@ class ProductStorageDomain<Root extends RootState> extends Domain<Root['products
     }
 
     @query()
-    *getCollectors(productId: string): Generator<unknown, UserEntity[] | DomainErrResult, unknown> {
+    *getCollectors(productId: string) {
         const productResult = (yield* (this as any).getProduct(productId)) as ProductEntity | DomainErrResult
         if (typeof productResult === 'object' && 'type' in productResult && productResult.type === 'err')
             return productResult

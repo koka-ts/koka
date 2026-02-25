@@ -9,15 +9,29 @@ import {
     query,
     effect,
     get,
+    getResult,
     getState,
     set,
     setState,
     emit,
+    object,
+    optional,
+    union,
+    shallowEqual,
     shallowEqualResult,
     subscribeDomainResult,
     subscribeDomainState,
     subscribeQueryResult,
     subscribeQueryState,
+    getKeyFromPath,
+    getDomainCtorKey,
+    getDomainCacheKey,
+    getDomainState,
+    getQueryResult,
+    getQueryState,
+    runQuery,
+    runCommand,
+    type AnyDomain,
     type EffectContext,
 } from '../src/koka-domain.ts'
 
@@ -454,7 +468,12 @@ describe('Store', () => {
             plugins: [plugin],
         })
 
-        expect(plugin).toHaveBeenCalledWith(store)
+        expect(plugin).toHaveBeenCalledTimes(1)
+        expect(plugin.mock.calls[0][0].getState()).toEqual({
+            todos: [],
+            filter: 'all',
+            input: '',
+        })
     })
 
     it('should handle plugin cleanup', () => {
@@ -961,5 +980,432 @@ describe('Domain effect', () => {
         expect(effectRunCount).toBe(1)
         unsubscribe()
         expect(abortFired).toBe(true)
+    })
+})
+
+// ---------------------------------------------------------------------------
+// Path & cache key utilities
+// ---------------------------------------------------------------------------
+
+describe('getKeyFromPath', () => {
+    it('should return "root" for root path', () => {
+        expect(getKeyFromPath({ type: 'root' })).toBe('root')
+    })
+
+    it('should serialize select path', () => {
+        expect(getKeyFromPath({ type: 'select', key: 'input', prev: { type: 'root' } })).toBe('root.input')
+        expect(
+            getKeyFromPath({
+                type: 'select',
+                key: 'todos',
+                prev: { type: 'select', key: 'input', prev: { type: 'root' } },
+            }),
+        ).toBe('root.input.todos')
+    })
+
+    it('should serialize find path', () => {
+        const path = {
+            type: 'find' as const,
+            key: 'id',
+            value: 1,
+            prev: { type: 'select' as const, key: 'todos', prev: { type: 'root' as const } },
+        }
+        expect(getKeyFromPath(path)).toBe('root.todos.find(id=1)')
+    })
+
+    it('should serialize match path', () => {
+        const path = {
+            type: 'match' as const,
+            key: 'filter',
+            value: 'done',
+            prev: { type: 'root' as const },
+        }
+        expect(getKeyFromPath(path)).toBe('root.match(filter=done)')
+    })
+
+    it('should serialize filter path', () => {
+        const path = {
+            type: 'filter' as const,
+            key: 'done',
+            value: true,
+            prev: { type: 'select' as const, key: 'todos', prev: { type: 'root' as const } },
+        }
+        expect(getKeyFromPath(path)).toBe('root.todos.filter(done=true)')
+    })
+
+    it('should serialize map path', () => {
+        const path = {
+            type: 'map' as const,
+            key: 'text',
+            prev: { type: 'select' as const, key: 'todos', prev: { type: 'root' as const } },
+        }
+        expect(getKeyFromPath(path)).toBe('root.todos.map(text)')
+    })
+
+    it('should serialize object path', () => {
+        const path = {
+            type: 'object' as const,
+            shape: {
+                a: { type: 'root' as const },
+                b: { type: 'select' as const, key: 'x', prev: { type: 'root' as const } },
+            },
+        }
+        expect(getKeyFromPath(path)).toContain('object(')
+        expect(getKeyFromPath(path)).toContain('root')
+    })
+
+    it('should serialize optional path', () => {
+        const path = {
+            type: 'optional' as const,
+            inner: { type: 'select' as const, key: 'item', prev: { type: 'root' as const } },
+        }
+        expect(getKeyFromPath(path)).toBe('optional(root.item)')
+    })
+})
+
+describe('getDomainCtorKey and getDomainCacheKey', () => {
+    it('should return stable key for same constructor', () => {
+        class A<Root> extends Domain<string, Root> {}
+        const k1 = getDomainCtorKey(A)
+        const k2 = getDomainCtorKey(A)
+        expect(k1).toBe(k2)
+    })
+
+    it('should return different keys for different constructors', () => {
+        class A<Root> extends Domain<string, Root> {}
+        class B<Root> extends Domain<string, Root> {}
+        expect(getDomainCtorKey(A)).not.toBe(getDomainCtorKey(B))
+    })
+
+    it('should combine ctor key and path key', () => {
+        const store = new Store<TodoApp>({
+            state: { todos: [], filter: 'all', input: '' },
+        })
+        const d = store.domain.select('input')
+        const ctorKey = getDomainCtorKey(Domain)
+        const pathKey = getKeyFromPath(d.path)
+        expect(getDomainCacheKey(Domain, d.path)).toBe(ctorKey + ':' + pathKey)
+    })
+})
+
+// ---------------------------------------------------------------------------
+// Domain.match, filter, map
+// ---------------------------------------------------------------------------
+
+describe('Domain.match', () => {
+    it('should narrow state by match', () => {
+        const store = new Store<TodoApp>({
+            state: { todos: [], filter: 'done', input: '' },
+        })
+        const app = store.domain
+        const doneDomain = app.match('filter', 'done')
+        const state = getState(doneDomain)
+        expect(state.type).toBe('ok')
+        if (state.type === 'ok') expect(state.value.filter).toBe('done')
+    })
+})
+
+describe('Domain.filter', () => {
+    it('should return filtered array domain', () => {
+        const store = new Store<TodoApp>({
+            state: {
+                todos: [
+                    { id: 1, text: 'a', done: false },
+                    { id: 2, text: 'b', done: true },
+                    { id: 3, text: 'c', done: true },
+                ],
+                filter: 'all',
+                input: '',
+            },
+        })
+        const todosDomain = store.domain.select('todos') as Domain<Todo[], TodoApp>
+        const doneTodosDomain = todosDomain.filter('done', true)
+        const state = getState(doneTodosDomain)
+        expect(state.type).toBe('ok')
+        if (state.type === 'ok') {
+            expect(state.value).toHaveLength(2)
+            expect(state.value.every((t: Todo) => t.done)).toBe(true)
+        }
+    })
+})
+
+describe('Domain.map', () => {
+    it('should return mapped array domain', () => {
+        const store = new Store<TodoApp>({
+            state: {
+                todos: [
+                    { id: 1, text: 'a', done: false },
+                    { id: 2, text: 'b', done: true },
+                ],
+                filter: 'all',
+                input: '',
+            },
+        })
+        const todosDomain = store.domain.select('todos') as Domain<Todo[], TodoApp>
+        const textsDomain = todosDomain.map('text')
+        const state = getState(textsDomain)
+        expect(state.type).toBe('ok')
+        if (state.type === 'ok') {
+            expect(state.value).toEqual(['a', 'b'])
+        }
+    })
+})
+
+// ---------------------------------------------------------------------------
+// object, union, optional
+// ---------------------------------------------------------------------------
+
+describe('object()', () => {
+    it('should compose domains from same store', () => {
+        const store = new Store<TodoApp>({
+            state: { todos: [], filter: 'all', input: 'x' },
+        })
+        const input$ = store.domain.select('input') as Domain<string, TodoApp>
+        const filter$ = store.domain.select('filter') as Domain<TodoFilter, TodoApp>
+        const composed = object({ input: input$, filter: filter$ } as any)
+        const state = getState(composed)
+        expect(state).toEqual(Accessor.ok({ input: 'x', filter: 'all' }))
+    })
+
+    it('should throw if domains belong to different stores', () => {
+        const store1 = new Store<TodoApp>({ state: { todos: [], filter: 'all', input: 'a' } })
+        const store2 = new Store<TodoApp>({ state: { todos: [], filter: 'all', input: 'b' } })
+        expect(() => object({ a: store1.domain.select('input'), b: store2.domain.select('input') } as any)).toThrow(
+            /same store/,
+        )
+    })
+})
+
+describe('union()', () => {
+    it('should create union domain from same store', () => {
+        const store = new Store<TodoApp>({
+            state: { todos: [], filter: 'all', input: 'hi' },
+        })
+        const input$ = store.domain.select('input') as Domain<string, TodoApp>
+        const filter$ = store.domain.select('filter') as Domain<TodoFilter, TodoApp>
+        const u = union(input$, filter$ as any)
+        const result = getState(u)
+        expect(result.type).toBe('ok')
+        expect(['hi', 'all']).toContain((result as any).value)
+    })
+})
+
+describe('optional()', () => {
+    it('should wrap domain and allow undefined', () => {
+        const store = new Store<{ item?: string }>({ state: {} })
+        const itemDomain = store.domain.select('item') as Domain<string | undefined, { item?: string }>
+        const opt = optional(itemDomain as any)
+        const result = getState(opt)
+        expect(result.type).toBe('ok')
+        expect((result as any).value).toBeUndefined()
+    })
+})
+
+// ---------------------------------------------------------------------------
+// shallowEqual & shallowEqualResult
+// ---------------------------------------------------------------------------
+
+describe('shallowEqual and shallowEqualResult', () => {
+    it('shallowEqual: same ref is equal', () => {
+        const o = { a: 1 }
+        expect(shallowEqual(o, o)).toBe(true)
+    })
+
+    it('shallowEqual: same keys and values', () => {
+        expect(shallowEqual({ a: 1, b: 2 }, { a: 1, b: 2 })).toBe(true)
+    })
+
+    it('shallowEqual: different values', () => {
+        expect(shallowEqual({ a: 1 }, { a: 2 })).toBe(false)
+    })
+
+    it('shallowEqualResult: ok and err are not equal', () => {
+        expect(shallowEqualResult(Accessor.ok(1), Accessor.err('e'))).toBe(false)
+    })
+
+    it('shallowEqualResult: two err with same error', () => {
+        expect(shallowEqualResult(Accessor.err('x'), Accessor.err('x'))).toBe(true)
+    })
+})
+
+// ---------------------------------------------------------------------------
+// runCommand return value, getDomainState, getQueryResult, getQueryState
+// ---------------------------------------------------------------------------
+
+describe('runCommand return value and getDomainState', () => {
+    let store: Store<TodoApp>
+    let todoApp$: TodoAppDomain<TodoApp>
+
+    beforeEach(() => {
+        todoUid = 0
+        store = new Store<TodoApp>({
+            state: { todos: [], filter: 'all', input: '' },
+        })
+        todoApp$ = store.domain.use(TodoAppDomain) as unknown as TodoAppDomain<TodoApp>
+    })
+
+    it('should return command return value from runCommand', () => {
+        const ret = store.runCommand(todoApp$.updateInput('hello'))
+        expect(ret).toBe('Input updated')
+        const ret2 = store.runCommand(todoApp$.input$.updateText('world'))
+        expect(ret2).toBe('text updated')
+        const ret3 = store.runCommand(todoApp$.addTodo())
+        expect(ret3).toBe('Todo added')
+    })
+
+    it('getDomainState should return state or throw', () => {
+        store.runCommand(todoApp$.updateInput('x'))
+        expect(getDomainState(todoApp$.input$)).toBe('x')
+    })
+
+    it('getQueryState should return query value or throw', () => {
+        const summary = getQueryState(todoApp$.getTodoSummary())
+        expect(summary).toEqual({ activeTodoCount: 0, completedTodoCount: 0, filter: 'all' })
+    })
+
+    it('getQueryResult should return Result', () => {
+        const result = getQueryResult(todoApp$.getTodoSummary())
+        expect(result.type).toBe('ok')
+        if (result.type === 'ok') {
+            expect(result.value).toEqual({ activeTodoCount: 0, completedTodoCount: 0, filter: 'all' })
+        }
+    })
+})
+
+// ---------------------------------------------------------------------------
+// command.context()
+// ---------------------------------------------------------------------------
+
+describe('command.context()', () => {
+    it('should provide args and previous in command context', () => {
+        type S = { count: number }
+        class CounterDomain<Root> extends Domain<S, Root> {
+            @command()
+            *increment() {
+                const ctx = yield* command.context()
+                const count = (yield* get(this)).count
+                yield* set(this, { count: count + 1 })
+                return { args: ctx.args, hasPrevious: !!ctx.previous }
+            }
+        }
+        const store = new Store<S>({ state: { count: 0 } })
+        const counter$ = store.domain.use(CounterDomain) as unknown as CounterDomain<S>
+        const r1 = store.runCommand(counter$.increment())
+        expect(r1).toEqual({ args: [], hasPrevious: false })
+        expect(store.getState().count).toBe(1)
+        // Second run: previous run already completed, so last was cleared (retreat to running); no previous.
+        const r2 = store.runCommand(counter$.increment())
+        expect(r2).toEqual({ args: [], hasPrevious: false })
+        expect(store.getState().count).toBe(2)
+    })
+})
+
+// ---------------------------------------------------------------------------
+// Unregistered generator and errorQuery
+// ---------------------------------------------------------------------------
+
+describe('runQuery/runCommand with unregistered generator', () => {
+    it('runQuery should throw when generator is not registered', () => {
+        const store = new Store<TodoApp>({ state: { todos: [], filter: 'all', input: '' } })
+        const todoApp$ = store.domain.use(TodoAppDomain) as unknown as TodoAppDomain<TodoApp>
+        function* unboundQuery() {
+            return yield* get(todoApp$.todos$)
+        }
+        expect(() => runQuery(unboundQuery())).toThrow(/generator not registered/)
+    })
+
+    it('runCommand should throw when generator is not registered', () => {
+        const store = new Store<TodoApp>({ state: { todos: [], filter: 'all', input: '' } })
+        const todoApp$ = store.domain.use(TodoAppDomain) as unknown as TodoAppDomain<TodoApp>
+        function* unboundCommand() {
+            yield* set(todoApp$.input$, 'x')
+            return 'done'
+        }
+        expect(() => runCommand(unboundCommand())).toThrow(/generator not registered/)
+    })
+})
+
+describe('TodoAppDomain.errorQuery (invalid select)', () => {
+    it('should throw when running errorQuery that accesses invalid index', () => {
+        const store = new Store<TodoApp>({
+            state: { todos: [{ id: 1, text: 't', done: false }], filter: 'all', input: '' },
+        })
+        const todoApp$ = store.domain.use(TodoAppDomain) as unknown as TodoAppDomain<TodoApp>
+        expect(() => store.runQuery(todoApp$.errorQuery())).toThrow()
+    })
+})
+
+// ---------------------------------------------------------------------------
+// Domain.getParentDomains, getAncestorDomains
+// ---------------------------------------------------------------------------
+
+describe('Domain.getParentDomains and getAncestorDomains', () => {
+    it('should return empty for root domain', () => {
+        const store = new Store<TodoApp>({ state: { todos: [], filter: 'all', input: '' } })
+        expect(Domain.getParentDomains(store.domain)).toHaveLength(0)
+        // getAncestorDomains includes the domain itself, so root yields [root]
+        const rootAncestors = Domain.getAncestorDomains(store.domain)
+        expect(rootAncestors).toHaveLength(1)
+        expect(rootAncestors[0].key).toBe(store.domain.key)
+    })
+
+    it('should return parent for selected domain', () => {
+        const store = new Store<TodoApp>({ state: { todos: [], filter: 'all', input: '' } })
+        const inputDomain = store.domain.select('input')
+        const rootKey = store.domain.key
+        const parents = Domain.getParentDomains(inputDomain)
+        expect(parents).toHaveLength(1)
+        expect(parents[0].key).toBe(rootKey)
+        const ancestors = Domain.getAncestorDomains(inputDomain)
+        expect(ancestors.length).toBeGreaterThanOrEqual(1)
+        expect(ancestors.map((a) => a.key)).toContain(rootKey)
+    })
+
+    it('should return ancestor chain for nested domain', () => {
+        const store = new Store<TodoApp>({
+            state: { todos: [{ id: 1, text: 't', done: false }], filter: 'all', input: '' },
+        })
+        const todoApp$ = store.domain.use(TodoAppDomain) as unknown as TodoAppDomain<TodoApp>
+        const todo$ = todoApp$.todos$.todo(1)
+        const ancestors = Domain.getAncestorDomains(todo$ as unknown as AnyDomain)
+        expect(ancestors.length).toBeGreaterThanOrEqual(2)
+    })
+})
+
+// ---------------------------------------------------------------------------
+// Event factory
+// ---------------------------------------------------------------------------
+
+describe('Event()', () => {
+    it('should create event class with name and payload', () => {
+        const MyEvent = Event('MyEvent')<{ id: number }>
+        const e = new MyEvent({ id: 42 })
+        expect(e.type).toBe('event')
+        expect(e.name).toBe('MyEvent')
+        expect(e.payload).toEqual({ id: 42 })
+    })
+})
+
+// ---------------------------------------------------------------------------
+// getResult (generator used inside query)
+// ---------------------------------------------------------------------------
+
+describe('getResult', () => {
+    it('should return Result when used inside query', () => {
+        class GetResultQueryDomain<Root> extends Domain<TodoApp, Root> {
+            input$ = this.select('input');
+
+            @query()
+            *getInputResult() {
+                return yield* getResult(this.input$)
+            }
+        }
+        const store = new Store<TodoApp>({
+            state: { todos: [], filter: 'all', input: 'x' },
+        })
+        const app$ = store.domain.use(GetResultQueryDomain) as unknown as GetResultQueryDomain<TodoApp>
+        const result = store.runQuery(app$.getInputResult())
+        expect(result.type).toBe('ok')
+        if (result.type === 'ok') expect(result.value).toBe('x')
     })
 })
