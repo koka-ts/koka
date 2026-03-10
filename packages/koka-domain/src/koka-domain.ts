@@ -5,6 +5,7 @@ import * as Ctx from 'koka/ctx'
 import * as Result from 'koka/result'
 import * as Err from 'koka/err'
 import * as Opt from 'koka/opt'
+import * as Task from 'koka/task'
 
 import { shallowEqual } from './shallowEqual'
 
@@ -50,8 +51,8 @@ function stableStringify(obj: unknown, seen = new WeakMap<object, boolean>()): s
 
 export type ToType<T> = T extends object | unknown[]
     ? {
-          [key in keyof T]: ToType<T[key]>
-      }
+        [key in keyof T]: ToType<T[key]>
+    }
     : T
 
 export type DomainSelectPath = {
@@ -521,7 +522,8 @@ export class DomainStorage {
     effectStorages = new Map<string, EffectStorage>()
     usedByQueries = new Set<QueryStorage>()
     usedByEffects = new Set<EffectStorage>()
-    eventHandlers = new Map<AnyEventCtor, AnyEventHandler>()
+    syncEventHandlers = new Map<AnyEventCtor, Set<AnySyncEventHandler>>()
+    asyncEventHandlers = new Map<AnyEventCtor, Set<AnyAsyncEventHandler>>()
 
     constructor(domain: AnyDomain) {
         this.domain = domain
@@ -551,7 +553,7 @@ export class DomainStorage {
     }
 }
 
-class QueryError extends Err.Err('QueryError')<Error> {}
+class QueryError extends Err.Err('QueryError')<Error> { }
 
 export type QueryResult<T> = Result.Ok<T> | Accessor.AccessorErr | QueryError | Err.AnyErr
 
@@ -854,18 +856,18 @@ export function shallowEqualResult(resultA: Result.AnyResult, resultB: Result.An
 
 export type GetEnv =
     | {
-          type: 'query-get'
-          queryStorage: QueryStorage
-      }
+        type: 'query-get'
+        queryStorage: QueryStorage
+    }
     | {
-          type: 'effect-get'
-          effectStorage: EffectStorage
-      }
+        type: 'effect-get'
+        effectStorage: EffectStorage
+    }
     | {
-          type: 'command-get'
-      }
+        type: 'command-get'
+    }
 
-class GetCtx extends Ctx.Ctx('GetCtx')<GetEnv> {}
+class GetCtx extends Ctx.Ctx('GetCtx')<GetEnv> { }
 
 export function* get<State, Root = any>(domain: Domain<State, Root>): Generator<GetCtx, State, unknown> {
     const domainStorage = DomainStorage.getOrCreate(domain)
@@ -894,7 +896,7 @@ type SetEnv = {
     type: 'set-storage'
 }
 
-class SetCtx extends Ctx.Ctx('SetCtx')<SetEnv> {}
+class SetCtx extends Ctx.Ctx('SetCtx')<SetEnv> { }
 
 export function* set<State, Root = any>(
     domain: Domain<State, Root>,
@@ -918,14 +920,15 @@ export function* set<State, Root = any>(
 
 export type EmitEnv = {
     type: 'emit'
-    pendingEvents: Array<{ domain: AnyDomain; event: AnyEvent }>
 }
 
-class EmitCtx extends Ctx.Ctx('EmitCtx')<EmitEnv> {}
+class EmitCtx extends Ctx.Ctx('EmitCtx')<EmitEnv> { }
 
 export function* emit<E extends AnyEvent>(domain: AnyDomain, event: E): Generator<EmitCtx, void, unknown> {
-    const env = yield* Ctx.get(EmitCtx)
-    env.pendingEvents.push({ domain, event })
+    domain.store.pendingEvents.push({
+        domain,
+        event,
+    })
 }
 
 export type StorePlugin<Root, S extends Store<Root> = Store<Root>> = (store: S) => (() => void) | void
@@ -969,7 +972,7 @@ export class Store<Root> {
                 }
             }
         }
-        return () => {}
+        return () => { }
     }
 
     getState() {
@@ -1031,6 +1034,8 @@ export class Store<Root> {
 
     changedEffects = new Set<EffectStorage>()
 
+    pendingEvents: Array<{ domain: AnyDomain, event: AnyEvent }> = []
+
     private dirty = false
 
     private listeners: ((state: Root) => unknown)[] = []
@@ -1055,6 +1060,27 @@ export class Store<Root> {
         for (const listener of [...this.listeners]) {
             listener(this.state)
         }
+    }
+
+    update() {
+        const pendingEvents = this.pendingEvents
+
+        this.pendingEvents = []
+
+        for (const event of pendingEvents) {
+            triggerSyncEventHandlers(event.domain, event.event)
+        }
+
+        const changedDomains = this.changedDomains
+
+
+
+
+
+        for (const event of pendingEvents) {
+            triggerAsyncEventHandlers(event.domain, event.event)
+        }
+
     }
 
     abortController = new AbortController()
@@ -1116,7 +1142,7 @@ export class Store<Root> {
             event: EventValue<InstanceType<Ctors[number]>>,
         ) => Generator<Koka.AnySyncEff | AsyncEventEff, void, unknown>,
     ): () => void {
-        return () => {}
+        return () => { }
     }
 
     runQuerySync<Yield extends SyncQueryEff, Return = unknown>(gen: Generator<Yield, Return>): Return {
@@ -1172,7 +1198,7 @@ export class Store<Root> {
         gen: SyncQuery<E, Return>,
         subscriber: (value: Return) => unknown,
     ): () => void {
-        return () => {}
+        return () => { }
     }
 
     // TODO: implement query result subscription with dependency-based invalidation
@@ -1180,7 +1206,7 @@ export class Store<Root> {
         gen: SyncQuery<E, Return>,
         subscriber: (result: Result<Return>) => unknown,
     ): () => void {
-        return () => {}
+        return () => { }
     }
 
     runCommandSync<E extends Koka.AnySyncEff | SyncCommandEff, Return = unknown>(
@@ -1214,6 +1240,83 @@ export class Store<Root> {
     }
 }
 
+function topologicalSort<T>(
+    nodes: Set<T>,
+    getDependencies: (node: T) => Set<T>,
+    visitor: (node: T) => void
+): void {
+    const visited = new Set<T>()
+    const visiting = new Set<T>()
+
+    function visit(node: T) {
+        if (visited.has(node)) return
+        if (visiting.has(node)) throw new Error('Cycle detected')
+        visiting.add(node)
+        visitor(node)
+        for (const dependency of getDependencies(node)) {
+            visit(dependency)
+        }
+        visiting.delete(node)
+        visited.add(node)
+    }
+
+    for (const node of nodes) {
+        visit(node)
+    }
+
+}
+
+function triggerSyncEventHandlers<Ctors extends AnyEventCtor[]>(
+    domain: AnyDomain,
+    event: EventValue<InstanceType<Ctors[number]>>,
+): void {
+    const domainStorage = DomainStorage.getOrCreate(domain)
+
+    const handlers = domainStorage.syncEventHandlers.get(event)
+
+    if (handlers) {
+        for (const handler of handlers) {
+            domain.store.runCommandSync(handler(event))
+        }
+    }
+
+    if (domain.parentDomain) {
+        triggerSyncEventHandlers(domain.parentDomain, event)
+    }
+}
+
+async function triggerAsyncEventHandlers<Ctors extends AnyEventCtor[]>(
+    domain: AnyDomain,
+    event: EventValue<InstanceType<Ctors[number]>>,
+) {
+    const domainStorage = DomainStorage.getOrCreate(domain)
+
+    const tasks = [] as Koka.AnyEffector[]
+    domainStorage.asyncEventHandlers.get(event)
+
+    let current: DomainStorage | undefined = domainStorage
+
+    while (current) {
+        const currentHandlers = current.asyncEventHandlers.get(event)
+        if (currentHandlers) {
+            for (const handler of currentHandlers) {
+                tasks.push(handler(event))
+            }
+        }
+
+        if (current.domain.parentDomain) {
+            current = DomainStorage.getOrCreate(current.domain.parentDomain)
+        } else {
+            current = undefined
+        }
+    }
+
+
+    // @ts-ignore
+    await Koka.runAsync(Task.drain(tasks))
+}
+
+
 export function Event<const Name extends string>(name: Name) {
     return class EventClass<T = void> implements Event<Name, T> {
         type = 'event' as const
@@ -1225,7 +1328,7 @@ export function Event<const Name extends string>(name: Name) {
     }
 }
 
-function createSyncEventDecorator<EventCtors extends AnyEventCtor[]>(events: EventCtors) {
+function createSyncEventDecorator<EventCtors extends AnyEventCtor[]>(EventCtors: EventCtors) {
     return function eventDecorator<This, Yield extends SyncEventEff>(
         target: (this: This, event: EventValue<InstanceType<EventCtors[number]>>) => Generator<Yield, unknown, unknown>,
         context: KokaClassMethodDecoratorContext<This, typeof target>,
@@ -1237,11 +1340,59 @@ function createSyncEventDecorator<EventCtors extends AnyEventCtor[]>(events: Eve
                 throw new Error('Event must be used on a Domain class')
             }
 
+            const domainStorage = DomainStorage.getOrCreate(this)
+
             const eventMethod = target.bind(this) as SyncEventHandler<EventCtors, Yield>
+
+            for (const EventCtor of EventCtors) {
+                let handlers = domainStorage.syncEventHandlers.get(EventCtor)
+
+                if (!handlers) {
+                    handlers = new Set<AnySyncEventHandler>()
+                    domainStorage.syncEventHandlers.set(EventCtor, handlers)
+                }
+
+                handlers.add(eventMethod)
+            }
         })
 
         return target
     }
+}
+
+function createAsyncEventDecorator<EventCtors extends AnyEventCtor[]>(EventCtors: EventCtors) {
+    return function eventDecorator<This, Yield extends AsyncEventEff>(
+        target: (this: This, event: EventValue<InstanceType<EventCtors[number]>>) => Generator<Yield, unknown, unknown>,
+        context: KokaClassMethodDecoratorContext<This, typeof target>,
+    ): typeof target {
+        const methodName = String(context.name)
+
+        context.addInitializer(function (this: This) {
+            if (!(this instanceof Domain)) {
+                throw new Error('Event must be used on a Domain class')
+            }
+
+            const domainStorage = DomainStorage.getOrCreate(this)
+
+            const eventMethod = target.bind(this) as AsyncEventHandler<EventCtors, Yield>
+
+            for (const EventCtor of EventCtors) {
+                let handlers = domainStorage.asyncEventHandlers.get(EventCtor)
+                if (!handlers) {
+                    handlers = new Set<AnyAsyncEventHandler>()
+                    domainStorage.asyncEventHandlers.set(EventCtor, handlers)
+                }
+                handlers.add(eventMethod)
+            }
+        })
+
+        return target
+    }
+}
+
+export const event = {
+    sync: createSyncEventDecorator,
+    async: createAsyncEventDecorator,
 }
 
 function createSyncQueryDecorator() {
@@ -1411,7 +1562,7 @@ function createSyncEffectDecorator() {
                 throw new Error('Effect must be used on a Domain class')
             }
             const effectMethod = target.bind(this) as SyncEffectHandler<AnyDomain, E>
-            ;(this as any)[methodName] = effectMethod
+                ; (this as any)[methodName] = effectMethod
             effectMethod.type = 'sync'
             effectMethod.domain = this
             effectMethod.methodName = methodName
@@ -1431,7 +1582,7 @@ function createAsyncEffectDecorator() {
                 throw new Error('Effect must be used on a Domain class')
             }
             const effectMethod = target.bind(this) as AsyncEffectHandler<AnyDomain, E>
-            ;(this as any)[methodName] = effectMethod
+                ; (this as any)[methodName] = effectMethod
             effectMethod.type = 'async'
             effectMethod.domain = this
             effectMethod.methodName = methodName
