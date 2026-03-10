@@ -17,6 +17,10 @@ export type Eff<T> = Err<string, T> | Ctx<string, T> | Opt<string, T> | Async | 
 
 export type AnyEff = Eff<any>
 
+export type SyncEff<T> = Err<string, T> | Ctx<string, T> | Opt<string, T> | Final
+
+export type AnySyncEff = SyncEff<any>
+
 type UnionToIntersection<U> = (U extends any ? (k: U) => void : never) extends (k: infer I) => void ? I : never
 
 type ToHandler<Effect> = Effect extends Err<infer Name, infer U>
@@ -59,7 +63,7 @@ class TryPhase<Yield extends AnyEff, Return> extends EffPhase {
         super()
         this.effector = effector
     }
-    [Symbol.iterator]() {
+    [Symbol.iterator](): Generator<Yield, Return> {
         return readEffector(this.effector)
     }
     handle<Handlers extends Partial<EffectHandlers<Yield>>>(handlers: Handlers) {
@@ -129,7 +133,7 @@ class HandledPhase<Yield extends AnyEff, Return, Handlers extends Partial<Effect
         this.effector = effector
         this.handlers = handlers
     }
-    *handleEffects(): Generator<
+    *[Symbol.iterator](): Generator<
         Exclude<Yield, { name: keyof Handlers }> | Final,
         Return | ExtractErrorHandlerReturn<Handlers, Yield>
     > {
@@ -170,9 +174,6 @@ class HandledPhase<Yield extends AnyEff, Return, Handlers extends Partial<Effect
                 yield* new HandledPhase(cleanUpGen(gen, result), this.handlers)
             }
         }
-    }
-    [Symbol.iterator]() {
-        return this.handleEffects()
     }
     finally<Eff extends AnyEff = never>(finalEffector: Effector<Eff, void>) {
         return new FinalPhase(this, finalEffector)
@@ -288,6 +289,8 @@ export function runSync<E extends AnyOpt | Final, Return>(
 
 export type RunAsyncOptions = {
     abortSignal?: AbortSignal
+    onAsyncStart?: () => unknown
+    onAsyncEnd?: () => unknown
     onCleanupErrors?: (errors: Error[]) => unknown
 }
 
@@ -307,6 +310,7 @@ export async function runAsync<E extends Async | AnyOpt | Final, Return>(
     }
     let finalCount = 0
     let isAborted = false
+    let inAsync = false
 
     const process = (result: IteratorResult<Async | AnyOpt | Final, Return>): MaybePromise<Return> => {
         while (!result.done) {
@@ -315,11 +319,21 @@ export async function runAsync<E extends Async | AnyOpt | Final, Return>(
             }
             const effect = result.value
             if (effect.type === 'async') {
+                options?.onAsyncStart?.()
+                inAsync = true
                 return effect.promise.then(
                     (value) => {
+                        if (inAsync) {
+                            inAsync = false
+                            options?.onAsyncEnd?.()
+                        }
                         return process(gen.next(value))
                     },
                     (error) => {
+                        if (inAsync) {
+                            inAsync = false
+                            options?.onAsyncEnd?.()
+                        }
                         return process(gen.throw(error))
                     },
                 ) as MaybePromise<Return>
@@ -360,6 +374,10 @@ export async function runAsync<E extends Async | AnyOpt | Final, Return>(
         'abort',
         () => {
             isAborted = true
+            if (inAsync) {
+                inAsync = false
+                options?.onAsyncEnd?.()
+            }
             if (finalCount === 0) {
                 reject(new Error('[Koka.runAsync]Operation aborted'))
             }

@@ -3,7 +3,7 @@ import * as Accessor from 'koka-accessor'
 import {
     Domain,
     Store,
-    Event,
+    SyncEventMethod,
     event,
     command,
     query,

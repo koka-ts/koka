@@ -624,6 +624,299 @@ describe('Complex scenarios', () => {
     })
 })
 
+describe('RunAsyncOptions.onAsyncStart/onAsyncEnd', () => {
+    it('should call onAsyncStart and onAsyncEnd for a single async effect', async () => {
+        let startCount = 0
+        let endCount = 0
+
+        function* test() {
+            const value = yield* Async.await(Promise.resolve(42))
+            return value
+        }
+
+        const result = await Koka.runAsync(test(), {
+            onAsyncStart: () => {
+                startCount++
+            },
+            onAsyncEnd: () => {
+                endCount++
+            },
+        })
+
+        expect(result).toBe(42)
+        expect(startCount).toBe(1)
+        expect(endCount).toBe(1)
+    })
+
+    it('should call onAsyncStart and onAsyncEnd for each async effect', async () => {
+        let startCount = 0
+        let endCount = 0
+
+        function* test() {
+            const a = yield* Async.await(Promise.resolve(1))
+            const b = yield* Async.await(Promise.resolve(2))
+            const c = yield* Async.await(Promise.resolve(3))
+            return a + b + c
+        }
+
+        const result = await Koka.runAsync(test(), {
+            onAsyncStart: () => {
+                startCount++
+            },
+            onAsyncEnd: () => {
+                endCount++
+            },
+        })
+
+        expect(result).toBe(6)
+        expect(startCount).toBe(3)
+        expect(endCount).toBe(3)
+    })
+
+    it('should not call either callback when there are no async effects', async () => {
+        let startCount = 0
+        let endCount = 0
+
+        function* test() {
+            return 42
+        }
+
+        const result = await Koka.runAsync(test(), {
+            onAsyncStart: () => {
+                startCount++
+            },
+            onAsyncEnd: () => {
+                endCount++
+            },
+        })
+
+        expect(result).toBe(42)
+        expect(startCount).toBe(0)
+        expect(endCount).toBe(0)
+    })
+
+    it('should not call either callback for sync values passed to Async.await', async () => {
+        let startCount = 0
+        let endCount = 0
+
+        function* test() {
+            const value = yield* Async.await(42)
+            return value
+        }
+
+        const result = await Koka.runAsync(test(), {
+            onAsyncStart: () => {
+                startCount++
+            },
+            onAsyncEnd: () => {
+                endCount++
+            },
+        })
+
+        expect(result).toBe(42)
+        expect(startCount).toBe(0)
+        expect(endCount).toBe(0)
+    })
+
+    it('should call both callbacks even when promise rejects', async () => {
+        let startCount = 0
+        let endCount = 0
+
+        function* test() {
+            try {
+                yield* Async.await(Promise.reject(new Error('fail')))
+            } catch {
+                return 'caught'
+            }
+        }
+
+        const result = await Koka.runAsync(test(), {
+            onAsyncStart: () => {
+                startCount++
+            },
+            onAsyncEnd: () => {
+                endCount++
+            },
+        })
+
+        expect(result).toBe('caught')
+        expect(startCount).toBe(1)
+        expect(endCount).toBe(1)
+    })
+
+    it('should close lifecycle on abort: onAsyncEnd called for pending async', async () => {
+        const events: string[] = []
+        const controller = new AbortController()
+
+        function* test() {
+            yield* Async.await(Promise.resolve(1))
+            yield* Async.await(new Promise(() => {})) // never resolves
+            return 'should not reach here'
+        }
+
+        const promise = Koka.runAsync(test(), {
+            abortSignal: controller.signal,
+            onAsyncStart: () => {
+                events.push('start')
+            },
+            onAsyncEnd: () => {
+                events.push('end')
+            },
+        })
+
+        // abort fires synchronously while the first async is still pending in microtask queue
+        controller.abort()
+
+        await expect(promise).rejects.toThrow('[Koka.runAsync]Operation aborted')
+        // abort handler closes the first async's lifecycle; second async never starts
+        expect(events).toEqual(['start', 'end'])
+    })
+
+    it('should close lifecycle on abort even if only one async is pending', async () => {
+        const events: string[] = []
+        const controller = new AbortController()
+
+        function* test() {
+            yield* Async.await(new Promise(() => {})) // never resolves
+            return 'should not reach here'
+        }
+
+        const promise = Koka.runAsync(test(), {
+            abortSignal: controller.signal,
+            onAsyncStart: () => {
+                events.push('start')
+            },
+            onAsyncEnd: () => {
+                events.push('end')
+            },
+        })
+
+        controller.abort()
+
+        await expect(promise).rejects.toThrow('[Koka.runAsync]Operation aborted')
+        expect(events).toEqual(['start', 'end'])
+    })
+
+    it('should not double-call onAsyncEnd if promise resolves after abort', async () => {
+        const events: string[] = []
+        const controller = new AbortController()
+        let resolvePromise: (v: number) => void
+
+        function* test() {
+            yield* Async.await(
+                new Promise<number>((resolve) => {
+                    resolvePromise = resolve
+                }),
+            )
+            return 'should not reach here'
+        }
+
+        const promise = Koka.runAsync(test(), {
+            abortSignal: controller.signal,
+            onAsyncStart: () => {
+                events.push('start')
+            },
+            onAsyncEnd: () => {
+                events.push('end')
+            },
+        })
+
+        controller.abort()
+        resolvePromise!(42)
+
+        await expect(promise).rejects.toThrow('[Koka.runAsync]Operation aborted')
+        await new Promise((r) => setTimeout(r, 10))
+        expect(events).toEqual(['start', 'end'])
+    })
+
+    it('should call both callbacks for async effects in finally blocks', async () => {
+        let startCount = 0
+        let endCount = 0
+        const actions: string[] = []
+
+        function* program() {
+            return yield* Koka.try(function* () {
+                actions.push('main')
+                return yield* Async.await(Promise.resolve(42))
+            }).finally(function* () {
+                yield* Async.await(Promise.resolve())
+                actions.push('async cleanup')
+            })
+        }
+
+        const result = await Koka.runAsync(program(), {
+            onAsyncStart: () => {
+                startCount++
+            },
+            onAsyncEnd: () => {
+                endCount++
+            },
+        })
+
+        expect(result).toBe(42)
+        expect(actions).toEqual(['main', 'async cleanup'])
+        expect(startCount).toBe(2)
+        expect(endCount).toBe(2)
+    })
+
+    it('should invoke onAsyncStart before onAsyncEnd in correct order', async () => {
+        const events: string[] = []
+
+        function* test() {
+            yield* Async.await(Promise.resolve(1))
+            yield* Async.await(Promise.resolve(2))
+            return 'done'
+        }
+
+        await Koka.runAsync(test(), {
+            onAsyncStart: () => {
+                events.push('start')
+            },
+            onAsyncEnd: () => {
+                events.push('end')
+            },
+        })
+
+        expect(events).toEqual(['start', 'end', 'start', 'end'])
+    })
+
+    it('should work with only onAsyncStart provided', async () => {
+        let startCount = 0
+
+        function* test() {
+            yield* Async.await(Promise.resolve(42))
+            return 'done'
+        }
+
+        const result = await Koka.runAsync(test(), {
+            onAsyncStart: () => {
+                startCount++
+            },
+        })
+
+        expect(result).toBe('done')
+        expect(startCount).toBe(1)
+    })
+
+    it('should work with only onAsyncEnd provided', async () => {
+        let endCount = 0
+
+        function* test() {
+            yield* Async.await(Promise.resolve(42))
+            return 'done'
+        }
+
+        const result = await Koka.runAsync(test(), {
+            onAsyncEnd: () => {
+                endCount++
+            },
+        })
+
+        expect(result).toBe('done')
+        expect(endCount).toBe(1)
+    })
+})
+
 describe('runAsync abort signal edge cases', () => {
     it('should handle already aborted signal', async () => {
         const controller = new AbortController()
